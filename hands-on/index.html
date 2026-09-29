@@ -128,6 +128,8 @@
       background: var(--text-dim);
     }
     .status-pill .dot.on { background: var(--green); animation: pulse 1.4s infinite; }
+    .status-pill .dot.wait { background: var(--accent); animation: pulse 0.8s infinite; }
+    .status-pill .dot.err { background: var(--red); }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
 
     /* ─── Log Area ─── */
@@ -149,6 +151,21 @@
     .log-assistant { background: rgba(52,211,153,0.12); color: var(--green); }
     .log-system { background: rgba(255,153,0,0.08); color: var(--accent); font-size: 0.72rem; max-width: 100%; }
     .log-tool { background: rgba(167,139,250,0.12); color: var(--purple); font-size: 0.72rem; }
+    .log-error {
+      background: rgba(248,113,113,0.1);
+      border: 1px solid rgba(248,113,113,0.45);
+      color: var(--text);
+      font-size: 0.76rem;
+      max-width: 100%;
+      padding: 10px 12px;
+    }
+    .log-error .err-title { color: var(--red); font-weight: 700; margin-bottom: 4px; }
+    .log-error ul { margin: 4px 0 4px 18px; }
+    .log-error li { margin: 2px 0; }
+    .log-error code, .log-error .mono { font-family: var(--mono); font-size: 0.7rem; }
+    .log-error details { margin-top: 6px; color: var(--text-dim); }
+    .log-error summary { cursor: pointer; font-size: 0.68rem; }
+    .log-error details div { margin-top: 4px; white-space: pre-wrap; word-break: break-all; }
 
     /* ─── Text Input Bar ─── */
     .input-bar {
@@ -346,6 +363,16 @@
         </div>
       </div>
 
+      <!-- Server URL -->
+      <div class="field">
+        <div class="field-label">
+          <span>Server URL</span>
+          <button onclick="resetServerUrl()">Reset</button>
+        </div>
+        <input class="cfg" id="server-url" spellcheck="false" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:0.73rem;padding:8px 12px;">
+        <p class="field-note">server.py を PORT を変えて起動した場合のみ変更します (既定: ws://127.0.0.1:8765)</p>
+      </div>
+
       <!-- Advanced: Session Config -->
       <div class="field">
         <div class="field-label">
@@ -372,6 +399,7 @@
   <script>
   // ─── Defaults ───────────────────────────────────
   const DEFAULTS = {
+    serverUrl: "ws://127.0.0.1:8765",
     systemPrompt: "You are a friendly English conversation partner. Keep responses short (1-2 sentences). Respond in the same language as the user.",
     sessionConfig: {
       inferenceConfiguration: { maxTokens: 1024, topP: 0.9, temperature: 0.7 },
@@ -406,20 +434,32 @@
   const overlay = $('overlay');
   const settingsPanel = $('settings-panel');
   const promptPreviewText = $('prompt-preview-text');
+  const serverUrlEl = $('server-url');
+
+  // Nova 2 Sonic の 1 接続あたりの上限 (8 分)。少し手前で警告する
+  const SESSION_LIMIT_SEC = 8 * 60;
+  const SESSION_WARN_SEC = 7 * 60 + 30;
 
   // ─── State ──────────────────────────────────────
   let ws = null, audioCtx = null, mediaStream = null, processor = null;
   let playCtx = null, nextPlayTime = 0, isStreaming = false;
+  let sessionState = 'idle';          // idle | connecting | active
+  let outputSampleRate = 24000;
+  let sessionTimer = null, sessionStartedAt = 0, warnedLimit = false;
+  let lastErrorShown = false;
 
   // ─── Init ───────────────────────────────────────
   resetSystemPrompt();
   resetSessionConfig();
   resetPromptConfig();
+  try { serverUrlEl.value = localStorage.getItem('nova2sonic.serverUrl') || DEFAULTS.serverUrl; } catch(e) { serverUrlEl.value = DEFAULTS.serverUrl; }
+  serverUrlEl.addEventListener('change', () => { try { localStorage.setItem('nova2sonic.serverUrl', serverUrlEl.value.trim()); } catch(e) {} });
   updatePromptPreview();
+  checkEnvironment();
 
   systemPromptEl.addEventListener('input', updatePromptPreview);
 
-  btnMic.addEventListener('click', () => isStreaming ? stop() : start());
+  btnMic.addEventListener('click', () => sessionState === 'idle' ? start() : stop());
   textInput.addEventListener('keydown', e => { if (e.key === 'Enter') { e.preventDefault(); sendText(); } });
 
   // ─── Settings Panel ─────────────────────────────
@@ -432,6 +472,26 @@
   function resetPromptConfig() {
     promptConfigEl.value = JSON.stringify(DEFAULTS.promptConfig, null, 2);
   }
+  function resetServerUrl() {
+    serverUrlEl.value = DEFAULTS.serverUrl;
+    try { localStorage.removeItem('nova2sonic.serverUrl'); } catch(e) {}
+  }
+
+  // ─── 動作環境チェック ───────────────────────────
+  function checkEnvironment() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      showError({
+        title: 'このページではマイクを利用できません。',
+        hints: [
+          'index.html をファイルとして直接開くか (file://)、http://localhost で開いてください。',
+          'IP アドレスやホスト名 (http://192.168.x.x など) で開くと、ブラウザの制限でマイクが無効になります。',
+        ],
+      });
+    }
+    if (!window.AudioContext) {
+      showError({ title: 'このブラウザは Web Audio API に対応していません。', hints: ['Chrome または Edge の最新版を利用してください。'] });
+    }
+  }
 
   // ─── UI Updates ─────────────────────────────────
   function updatePromptPreview() {
@@ -443,70 +503,168 @@
   async function start() {
     // Parse configs
     let sessionConfig, promptConfig;
-    try { sessionConfig = JSON.parse(sessionConfigEl.value); } catch(e) { addLog('system','Session Config JSON error'); openSettings(); return; }
-    try { promptConfig = JSON.parse(promptConfigEl.value); } catch(e) { addLog('system','Prompt Config JSON error'); openSettings(); return; }
+    try { sessionConfig = JSON.parse(sessionConfigEl.value); }
+    catch(e) { showError({ title: 'Session Config の JSON が不正です。', hints: ['Settings で修正するか Reset を押してください。'], detail: e.message }); openSettings(); return; }
+    try { promptConfig = JSON.parse(promptConfigEl.value); }
+    catch(e) { showError({ title: 'Prompt Config の JSON が不正です。', hints: ['Settings で修正するか Reset を押してください。'], detail: e.message }); openSettings(); return; }
+    if (!systemPromptEl.value.trim()) {
+      showError({ title: 'System Prompt が空です。', hints: ['Settings で System Prompt を入力してください。'] });
+      openSettings(); return;
+    }
+    const rate = promptConfig?.audioOutputConfiguration?.sampleRateHertz;
+    outputSampleRate = [8000, 16000, 24000].includes(rate) ? rate : 24000;
 
+    lastErrorShown = false;
+    setUI('connecting');
+
+    // 1. マイク
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate:16000, channelCount:1, echoCancellation:true, noiseSuppression:true } });
+    } catch(err) {
+      showError(describeMicError(err));
+      cleanup(); return;
+    }
+    try {
       audioCtx = new AudioContext({ sampleRate: 16000 });
       const src = audioCtx.createMediaStreamSource(mediaStream);
       processor = audioCtx.createScriptProcessor(2048, 1, 1);
       src.connect(processor);
       processor.connect(audioCtx.destination);
+    } catch(err) {
+      showError({
+        title: 'マイク音声を 16kHz で処理できませんでした。',
+        hints: ['Firefox / Safari ではサンプリングレート変換に対応していない場合があります。Chrome または Edge を利用してください。'],
+        detail: `${err.name}: ${err.message}`,
+      });
+      cleanup(); return;
+    }
 
-      ws = new WebSocket('ws://127.0.0.1:8765');
-      ws.onopen = () => {
-        ws.send(JSON.stringify({ type: 'start', config: { sessionConfig, promptConfig, systemPrompt: systemPromptEl.value, enableTools: chkTools.checked } }));
-        isStreaming = true;
-        setUI('active');
-        addLog('system', 'Started');
+    // 2. WebSocket (server.py)
+    const url = serverUrlEl.value.trim() || DEFAULTS.serverUrl;
+    let opened = false;
+    try { ws = new WebSocket(url); }
+    catch(err) { showError({ title: `Server URL が不正です: ${url}`, hints: ['Settings の Server URL を確認してください。'], detail: err.message }); cleanup(); return; }
 
-        processor.onaudioprocess = e => {
-          if (!isStreaming || !ws || ws.readyState !== 1) return;
-          const f = e.inputBuffer.getChannelData(0);
-          const i16 = new Int16Array(f.length);
-          for (let i=0;i<f.length;i++) { const s=Math.max(-1,Math.min(1,f[i])); i16[i]=s<0?s*0x8000:s*0x7FFF; }
-          ws.send(JSON.stringify({ type:'audio', data: bufToB64(i16.buffer) }));
-        };
+    ws.onopen = () => {
+      opened = true;
+      addLog('system', 'サーバーに接続しました。Nova 2 Sonic のセッションを開始しています...');
+      ws.send(JSON.stringify({ type: 'start', config: { sessionConfig, promptConfig, systemPrompt: systemPromptEl.value, enableTools: chkTools.checked } }));
+      processor.onaudioprocess = e => {
+        if (sessionState !== 'active' || !ws || ws.readyState !== 1) return;
+        const f = e.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(f.length);
+        for (let i=0;i<f.length;i++) { const s=Math.max(-1,Math.min(1,f[i])); i16[i]=s<0?s*0x8000:s*0x7FFF; }
+        ws.send(JSON.stringify({ type:'audio', data: bufToB64(i16.buffer) }));
       };
-      ws.onmessage = e => handleMsg(JSON.parse(e.data));
-      ws.onclose = () => { if(isStreaming) stop(); };
-      ws.onerror = () => { addLog('system','Connection error — server.py is running?'); stop(); };
-    } catch(err) { addLog('system', 'Error: ' + err.message); }
+    };
+    ws.onmessage = e => { try { handleMsg(JSON.parse(e.data)); } catch(err) { console.error(err); } };
+    ws.onerror = () => {
+      if (!opened) {
+        showError({
+          title: `中継サーバー (${url}) に接続できません。`,
+          hints: [
+            'ターミナルで python setup.py (または python server.py) が起動したままになっているか確認してください。',
+            'エラーで停止している場合は、ターミナルに表示された対処方法に従ってください。',
+            'PORT を変更して起動した場合は、Settings の Server URL も合わせて変更してください。',
+            'ブラウザ拡張機能やセキュリティソフトが localhost への接続を遮断していないか確認してください。',
+          ],
+        });
+      }
+    };
+    ws.onclose = e => {
+      if (sessionState === 'idle') return;
+      if (opened && !lastErrorShown) {
+        showError({
+          title: '中継サーバーとの接続が切れました。',
+          hints: ['server.py が停止していないか、ターミナルを確認してください。'],
+          detail: `code=${e.code}${e.reason ? ' reason=' + e.reason : ''}`,
+        });
+      }
+      cleanup();
+    };
   }
 
+  function describeMicError(err) {
+    const detail = `${err.name}: ${err.message}`;
+    switch (err.name) {
+      case 'NotAllowedError':
+      case 'SecurityError':
+        return { title: 'マイクの使用が許可されていません。', detail, hints: [
+          'アドレスバー左の鍵 (またはサイト情報) アイコンからマイクを「許可」にして、再度 Start を押してください。',
+          'macOS: システム設定 > プライバシーとセキュリティ > マイク で、ブラウザを許可してください。',
+          'Windows: 設定 > プライバシーとセキュリティ > マイク で、デスクトップアプリのアクセスを許可してください。',
+        ]};
+      case 'NotFoundError':
+      case 'OverconstrainedError':
+        return { title: 'マイクが見つかりません。', detail, hints: ['マイクが接続されているか、OS の入力デバイス設定を確認してください。'] };
+      case 'NotReadableError':
+      case 'AbortError':
+        return { title: 'マイクを開けませんでした。', detail, hints: ['Teams / Zoom など、他のアプリがマイクを使用中でないか確認してください。'] };
+      default:
+        return { title: 'マイクの初期化に失敗しました。', detail, hints: ['Chrome または Edge の最新版で再度お試しください。'] };
+    }
+  }
+
+  // ユーザー操作による停止
   function stop() {
-    if (ws && ws.readyState === 1) { ws.send(JSON.stringify({type:'stop'})); ws.close(); }
-    ws = null; isStreaming = false;
-    if (processor) { processor.disconnect(); processor = null; }
-    if (audioCtx) { audioCtx.close(); audioCtx = null; }
-    if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream = null; }
-    clearAudioQueue();
-    setUI('idle');
+    if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({type:'stop'})); } catch(e) {} }
+    cleanup();
     addLog('system', 'Stopped');
   }
 
+  // ローカルのリソースを解放して待機状態に戻す
+  function cleanup() {
+    const socket = ws;
+    ws = null;
+    if (socket && socket.readyState <= 1) { try { socket.close(); } catch(e) {} }
+    isStreaming = false;
+    if (processor) { processor.onaudioprocess = null; processor.disconnect(); processor = null; }
+    if (audioCtx) { audioCtx.close(); audioCtx = null; }
+    if (mediaStream) { mediaStream.getTracks().forEach(t=>t.stop()); mediaStream = null; }
+    clearAudioQueue();
+    stopSessionTimer();
+    setUI('idle');
+  }
+
+  function startSessionTimer() {
+    sessionStartedAt = Date.now();
+    warnedLimit = false;
+    stopSessionTimer();
+    sessionTimer = setInterval(() => {
+      const sec = Math.floor((Date.now() - sessionStartedAt) / 1000);
+      statusText.textContent = `Streaming ${Math.floor(sec/60)}:${String(sec%60).padStart(2,'0')}`;
+      if (sec >= SESSION_WARN_SEC && !warnedLimit) {
+        warnedLimit = true;
+        addLog('system', `まもなく 1 接続の上限 (${SESSION_LIMIT_SEC/60} 分) に達し、セッションが切断されます。続ける場合は Stop → Start してください。`);
+      }
+    }, 1000);
+  }
+  function stopSessionTimer() { if (sessionTimer) { clearInterval(sessionTimer); sessionTimer = null; } }
+
   function sendText() {
     const t = textInput.value.trim();
-    if (!t || !isStreaming || !ws) return;
+    if (!t || sessionState !== 'active' || !ws) return;
     ws.send(JSON.stringify({ type:'textInject', content: t }));
     addLog('user', t);
     textInput.value = '';
   }
 
   function setUI(state) {
-    if (state === 'active') {
+    sessionState = state;
+    isStreaming = state === 'active';
+    statusDot.classList.remove('on', 'wait', 'err');
+    if (state === 'active' || state === 'connecting') {
       btnMic.className = 'btn-mic active';
       btnMic.innerHTML = '&#x25A0;';
-      statusDot.classList.add('on');
-      statusText.textContent = 'Streaming';
-      textInput.disabled = false;
-      btnSend.disabled = false;
+      statusDot.classList.add(state === 'active' ? 'on' : 'wait');
+      statusText.textContent = state === 'active' ? 'Streaming' : 'Connecting...';
+      textInput.disabled = state !== 'active';
+      btnSend.disabled = state !== 'active';
     } else {
       btnMic.className = 'btn-mic idle';
       btnMic.innerHTML = '&#x25B6;';
-      statusDot.classList.remove('on');
-      statusText.textContent = 'Ready';
+      if (lastErrorShown) statusDot.classList.add('err');
+      statusText.textContent = lastErrorShown ? 'Error' : 'Ready';
       textInput.disabled = true;
       btnSend.disabled = true;
     }
@@ -519,8 +677,24 @@
       case 'audio': playAudio(msg.data); break;
       case 'clearAudio': clearAudioQueue(); break;
       case 'toolCall': addLog('tool', `Tool: ${msg.toolName}(${msg.params})`); break;
-      case 'state': if(msg.state==='ended') addLog('system','Session ended (timeout or error)'); break;
-      case 'error': addLog('system', msg.message); break;
+      case 'toolError': addLog('tool', `Tool error: ${msg.toolName} — ${msg.message} (モデルにはエラー内容を返しています)`); break;
+      case 'state':
+        if (msg.state === 'active') {
+          setUI('active');
+          startSessionTimer();
+          addLog('system', 'Started — 話しかけてください');
+        } else if (msg.state === 'ended') {
+          if (!lastErrorShown) {
+            const sec = sessionStartedAt ? (Date.now() - sessionStartedAt) / 1000 : 0;
+            addLog('system', sec >= SESSION_LIMIT_SEC - 15
+              ? `1 接続の上限 (${SESSION_LIMIT_SEC/60} 分) に達したため、セッションが終了しました。Start で再開できます。`
+              : 'Nova 2 Sonic 側でセッションが終了しました。Start で再開できます。');
+          }
+          if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({type:'stop'})); } catch(e) {} }
+          cleanup();
+        }
+        break;
+      case 'error': showError(msg); break;
     }
   }
 
@@ -531,11 +705,15 @@
   speedSlider.addEventListener('input', () => { speedValue.textContent = parseFloat(speedSlider.value).toFixed(2) + 'x'; });
 
   function playAudio(b64) {
-    if (!playCtx) { playCtx = new AudioContext({sampleRate:24000}); nextPlayTime = playCtx.currentTime; }
+    if (!playCtx || playCtx.sampleRate !== outputSampleRate) {
+      if (playCtx) playCtx.close();
+      playCtx = new AudioContext({ sampleRate: outputSampleRate });
+      nextPlayTime = playCtx.currentTime;
+    }
     const i16 = new Int16Array(b64ToArr(b64));
     const f32 = new Float32Array(i16.length);
     for (let i=0;i<i16.length;i++) f32[i] = i16[i]/32768.0;
-    const buf = playCtx.createBuffer(1, f32.length, 24000);
+    const buf = playCtx.createBuffer(1, f32.length, outputSampleRate);
     buf.getChannelData(0).set(f32);
     const s = playCtx.createBufferSource();
     s.buffer = buf;
@@ -569,6 +747,36 @@
     d.textContent = text;
     logEl.appendChild(d);
     logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  // エラーを「何が起きたか / どうすればよいか / 詳細」の形で表示する
+  function showError(err) {
+    lastErrorShown = true;
+    const d = document.createElement('div');
+    d.className = 'log-entry log-error';
+    const title = document.createElement('div');
+    title.className = 'err-title';
+    title.textContent = '⚠ ' + (err.title || err.message || 'エラーが発生しました');
+    d.appendChild(title);
+    if (err.hints && err.hints.length) {
+      const ul = document.createElement('ul');
+      for (const h of err.hints) { const li = document.createElement('li'); li.textContent = h; ul.appendChild(li); }
+      d.appendChild(ul);
+    }
+    const detail = err.detail ? (err.code ? `${err.code}: ${err.detail}` : err.detail) : '';
+    if (detail) {
+      const det = document.createElement('details');
+      const sum = document.createElement('summary');
+      sum.textContent = '詳細';
+      const body = document.createElement('div');
+      body.className = 'mono';
+      body.textContent = detail;
+      det.appendChild(sum); det.appendChild(body);
+      d.appendChild(det);
+    }
+    logEl.appendChild(d);
+    logEl.scrollTop = logEl.scrollHeight;
+    if (sessionState === 'idle') setUI('idle');
   }
 
   // ─── Utils ──────────────────────────────────────

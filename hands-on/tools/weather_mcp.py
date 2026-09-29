@@ -7,9 +7,15 @@
 Nova 2 Sonic の Tool use で呼び出されることを想定。
 """
 
-import urllib.request
+import asyncio
 import json
-from typing import Any
+import urllib.request
+
+
+def _fetch_json(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "AWS-Deep-Cuts-Handson/1.0"})
+    with urllib.request.urlopen(req, timeout=5) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 # ─── Tool Spec (Nova 2 Sonic に渡すツール定義) ─────────────────
 WEATHER_TOOL_SPEC = {
@@ -96,6 +102,28 @@ AREA_CODES = {
 }
 
 
+def _format_temps(time_defines: list, temps: list) -> str:
+    """気象庁の気温予報を「最低/最高」の文字列にする
+
+    timeDefines の 00:00 が朝の最低気温、09:00 が日中の最高気温を表す。
+    朝の発表では当日の最低気温が過ぎているため、00:00 にも最高気温と同じ値が入る。
+    """
+    parts = []
+    first_date = None
+    for time_define, temp in zip(time_defines, temps):
+        if not temp:
+            continue
+        date, _, clock = time_define.partition("T")
+        first_date = first_date or date
+        label = "最高" if clock.startswith("09") else "最低"
+        parts.append((date, label, temp))
+    # 最初の日付 (発表時刻により今日または明日) の値だけを返す
+    day = [(label, temp) for date, label, temp in parts if date == first_date]
+    if len(day) == 2 and day[0][1] == day[1][1]:
+        day = [("最高", day[0][1])]
+    return " / ".join(f"{label}{temp}℃" for label, temp in day)
+
+
 async def get_weather(params: dict) -> dict:
     """気象庁 API から天気予報を取得"""
     area = params.get("area", "東京")
@@ -110,12 +138,10 @@ async def get_weather(params: dict) -> dict:
                 area = key
                 break
 
+    note = None
     if not area_code:
-        return {
-            "weather": "不明",
-            "area": area,
-            "message": f"'{area}' の地域コードが見つかりませんでした。東京の天気を取得します。",
-        }
+        # 対応表に無い地域は東京で代替し、その旨をモデルに伝える
+        note = f"'{area}' の地域コードが見つからなかったため、東京の天気を返します。"
         area_code = "130000"
         area = "東京"
 
@@ -123,9 +149,8 @@ async def get_weather(params: dict) -> dict:
     url = f"https://www.jma.go.jp/bosai/forecast/data/forecast/{area_code}.json"
 
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "AWS-Deep-Cuts-Handson/1.0"})
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
+        # urllib は同期 I/O のため、イベントループ (音声の中継) を止めないようスレッドで実行
+        data = await asyncio.to_thread(_fetch_json, url)
 
         # 最初の時系列データから天気を抽出
         time_series = data[0]["timeSeries"][0]
@@ -137,14 +162,17 @@ async def get_weather(params: dict) -> dict:
             if temps.get("areas"):
                 temp_area = temps["areas"][0]
                 temps_list = temp_area.get("temps", [])
-                if len(temps_list) >= 2:
-                    temp_info = f"最低{temps_list[0]}℃ / 最高{temps_list[1]}℃"
+                time_defines = temps.get("timeDefines", [])
+                temp_info = _format_temps(time_defines, temps_list)
 
-        return {
+        result = {
             "area": area,
             "weather": weather.replace("\u3000", " "),
             "temperature": temp_info or "情報なし",
         }
+        if note:
+            result["message"] = note
+        return result
 
     except Exception as e:
         return {
