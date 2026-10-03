@@ -96,7 +96,12 @@ setup.py は以下を順に確認し、問題があれば **原因と対処方�
 2. 依存パッケージ（`requirements.txt`）の確認・インストール
 3. AWS 認証（どの認証方式・どの IAM ロールで認証されたかを表示）
 4. Nova 2 Sonic の呼び出し確認（実際にストリームを開き、権限・リージョンを検証）
-5. WebSocket 中継サーバーの起動
+5. Nova 2 Sonic からのあいさつ（AI から「Welcome to AWS Deep Cuts!」と一言話して終わります）
+6. WebSocket 中継サーバーの起動
+
+> **Note**: あいさつ音声は `hands-on/output/welcome.wav` に保存され、OS 標準のプレイヤー（macOS: `afplay` / Windows: PowerShell / Linux: `paplay`・`aplay` など）で再生されます。自動再生できない環境ではファイルのパスが表示されます。あいさつが不要な場合は `python setup.py --no-welcome` で実行してください。
+>
+> このあいさつは、ユーザーが何も話さなくても AI から話し始める **Model-start-first** パターン（観点 2）の応用です。中身は [welcome.py](./hands-on/welcome.py) を参照してください。
 
 以下の表示が出れば準備完了です。
 

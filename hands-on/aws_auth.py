@@ -110,6 +110,19 @@ async def create_bedrock_runtime_client():
     return AsyncBedrockRuntimeClient(config=config)
 
 
+def install_quiet_exception_handler(loop) -> None:
+    """ストリームがエラーで閉じた後に awscrt の内部タスクが出す
+    「HTTP-stream has completed」のトレースバックを抑止する (原因は別途表示済みのため)"""
+
+    def handler(loop, context):
+        exc = context.get("exception")
+        if exc is not None and "HTTP_STREAM_HAS_COMPLETED" in str(exc):
+            return
+        loop.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
+
+
 # ─── エラーの分類 ───────────────────────────────────────────────────
 def _sso_hint() -> list[str]:
     profile = profile_label()

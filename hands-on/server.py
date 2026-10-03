@@ -569,6 +569,7 @@ async def main():
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    aws_auth.install_quiet_exception_handler(loop)
 
     # Windows / Unix 両対応のシグナルハンドラ
     if sys.platform == "win32":

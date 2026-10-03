@@ -6,7 +6,8 @@
   2. Python 依存パッケージ確認/インストール
   3. AWS 認証確認 (アクセスキー / IAM Identity Center / aws login / AssumeRole など)
   4. Nova 2 Sonic の呼び出し確認 (権限・リージョン)
-  5. WebSocket 中継サーバーの起動
+  5. Nova 2 Sonic からのあいさつ (AI から一言話して終わる)
+  6. WebSocket 中継サーバーの起動
 
 前提:
   - Python 3.12+ がインストールされていること
@@ -14,7 +15,8 @@
     (例: aws configure / aws configure sso + aws sso login / aws login)
 
 オプション:
-  --skip-check   手順 4 の呼び出し確認をスキップする
+  --skip-check   手順 4 の呼び出し確認と手順 5 のあいさつをスキップする
+  --no-welcome   手順 5 のあいさつだけをスキップする
 """
 
 import os
@@ -245,8 +247,12 @@ def check_model():
         print(f"  ⚠️  {region} は Nova 2 Sonic の対応リージョンではない可能性があります")
         print(f"     対応: {', '.join(aws_auth.SUPPORTED_REGIONS)}")
 
+    async def _main():
+        aws_auth.install_quiet_exception_handler(asyncio.get_running_loop())
+        await _probe_stream()
+
     try:
-        asyncio.run(_probe_stream())
+        asyncio.run(_main())
     except asyncio.TimeoutError:
         print("  ⚠️  応答がタイムアウトしました (ネットワークが遅い可能性)。起動は継続します。")
         return
@@ -271,6 +277,7 @@ def check_model():
 
 def main():
     skip_check = "--skip-check" in sys.argv[1:]
+    skip_welcome = skip_check or "--no-welcome" in sys.argv[1:]
 
     print()
     hr()
@@ -278,7 +285,7 @@ def main():
     hr()
     print()
 
-    print("Step 1/5: Python バージョンを確認")
+    print("Step 1/6: Python バージョンを確認")
     check_python()
     print()
 
@@ -290,22 +297,30 @@ def main():
     print(f"  Model:  {aws_auth.MODEL_ID}")
     print()
 
-    print("Step 2/5: Python パッケージを確認")
+    print("Step 2/6: Python パッケージを確認")
     check_and_install_packages()
     print()
 
-    print("Step 3/5: AWS 認証を確認")
+    print("Step 3/6: AWS 認証を確認")
     check_auth()
     print()
 
-    print("Step 4/5: Nova 2 Sonic の呼び出しを確認")
+    print("Step 4/6: Nova 2 Sonic の呼び出しを確認")
     if skip_check:
         print("  --skip-check が指定されたためスキップしました")
     else:
         check_model()
     print()
 
-    print("Step 5/5: WebSocket 中継サーバーを起動")
+    print("Step 5/6: Nova 2 Sonic からのあいさつ")
+    if skip_welcome:
+        print("  スキップしました")
+    else:
+        import welcome
+        welcome.run_welcome()
+    print()
+
+    print("Step 6/6: WebSocket 中継サーバーを起動")
     print()
     hr()
     print("  セットアップ完了")
