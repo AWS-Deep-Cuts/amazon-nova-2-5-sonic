@@ -1,7 +1,7 @@
 """
-AWS Deep Cuts: Amazon Nova 2 Sonic — WebSocket 中継サーバー
+AWS Deep Cuts: Amazon Nova 2.5 Sonic — WebSocket 中継サーバー
 
-ブラウザ (index.html) と Bedrock Nova 2 Sonic の間を中継する。
+ブラウザ (index.html) と Bedrock Nova 2.5 Sonic の間を中継する。
 セキュリティ: 127.0.0.1 にのみバインドし、外部からのアクセスを遮断する。
 
 起動方法:
@@ -66,7 +66,7 @@ def _error_message(exc: BaseException, phase: str) -> dict:
 
 # ─── Bedrock セッション ──────────────────────────────────────────
 class SonicSession:
-    """1つのブラウザ接続に対応する Nova 2 Sonic セッション"""
+    """1つのブラウザ接続に対応する Nova 2.5 Sonic セッション"""
 
     def __init__(self, ws, config: dict):
         self.ws = ws
@@ -213,7 +213,7 @@ class SonicSession:
         self._response_task = asyncio.create_task(self._process_responses())
 
     async def send_audio(self, base64_data: str):
-        """ブラウザから受信した音声チャンクを Nova Sonic に転送"""
+        """ブラウザから受信した音声チャンクを Nova 2.5 Sonic に転送"""
         if not self.is_active:
             return
         await self._send_event_safe({
@@ -343,7 +343,7 @@ class SonicSession:
                 reason = "error"
                 if not self._error_sent:  # 送信側で既に通知済みなら重複させない
                     self._error_sent = True
-                    await self._send_ws(_error_message(e, "Nova 2 Sonic セッション"))
+                    await self._send_ws(_error_message(e, "Nova 2.5 Sonic セッション"))
         finally:
             ended_by_user = self._closing
             self.is_active = False
@@ -536,7 +536,7 @@ def _check_credentials():
     """起動時に認証情報を解決できるか確認する (失敗しても起動は継続し、原因を表示)"""
     print(f"  Profile:   {aws_auth.profile_label()}")
     if REGION not in aws_auth.SUPPORTED_REGIONS:
-        print(f"  ⚠️  {REGION} は Nova 2 Sonic の対応リージョンではない可能性があります "
+        print(f"  ⚠️  {REGION} は Nova 2.5 Sonic の対応リージョンではない可能性があります "
               f"(対応: {', '.join(aws_auth.SUPPORTED_REGIONS)})")
     try:
         creds = aws_auth.create_boto3_session().get_credentials()
@@ -554,7 +554,7 @@ def _check_credentials():
 async def main():
     print("")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("  AWS Deep Cuts: Amazon Nova 2 Sonic")
+    print("  AWS Deep Cuts: Amazon Nova 2.5 Sonic")
     print("  WebSocket Relay Server")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"  WebSocket: ws://{HOST}:{PORT}")

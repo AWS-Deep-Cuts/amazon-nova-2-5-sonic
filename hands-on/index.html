@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nova 2 Sonic Playground</title>
+  <title>Nova 2.5 Sonic Playground</title>
   <style>
     :root {
       --bg: #101820;
@@ -304,7 +304,7 @@
 
   <!-- Top Bar -->
   <div class="topbar">
-    <h1>Nova 2 Sonic Playground</h1>
+    <h1>Nova 2.5 Sonic Playground</h1>
     <div class="topbar-right"></div>
   </div>
 
@@ -436,7 +436,7 @@
   const promptPreviewText = $('prompt-preview-text');
   const serverUrlEl = $('server-url');
 
-  // Nova 2 Sonic の 1 接続あたりの上限 (8 分)。少し手前で警告する
+  // Nova 2.5 Sonic の 1 接続あたりの上限 (8 分)。少し手前で警告する
   const SESSION_LIMIT_SEC = 8 * 60;
   const SESSION_WARN_SEC = 7 * 60 + 30;
 
@@ -547,7 +547,7 @@
 
     ws.onopen = () => {
       opened = true;
-      addLog('system', 'サーバーに接続しました。Nova 2 Sonic のセッションを開始しています...');
+      addLog('system', 'サーバーに接続しました。Nova 2.5 Sonic のセッションを開始しています...');
       ws.send(JSON.stringify({ type: 'start', config: { sessionConfig, promptConfig, systemPrompt: systemPromptEl.value, enableTools: chkTools.checked } }));
       processor.onaudioprocess = e => {
         if (sessionState !== 'active' || !ws || ws.readyState !== 1) return;
@@ -688,7 +688,7 @@
             const sec = sessionStartedAt ? (Date.now() - sessionStartedAt) / 1000 : 0;
             addLog('system', sec >= SESSION_LIMIT_SEC - 15
               ? `1 接続の上限 (${SESSION_LIMIT_SEC/60} 分) に達したため、セッションが終了しました。Start で再開できます。`
-              : 'Nova 2 Sonic 側でセッションが終了しました。Start で再開できます。');
+              : 'Nova 2.5 Sonic 側でセッションが終了しました。Start で再開できます。');
           }
           if (ws && ws.readyState === 1) { try { ws.send(JSON.stringify({type:'stop'})); } catch(e) {} }
           cleanup();

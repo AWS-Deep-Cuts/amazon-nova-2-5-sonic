@@ -1,7 +1,7 @@
 """
 AWS 認証ヘルパー — setup.py / server.py 共通
 
-Nova 2 Sonic の双方向ストリーミング API は、boto3 ではなく新しい Python SDK
+Nova 2.5 Sonic の双方向ストリーミング API は、boto3 ではなく新しい Python SDK
 (aws-sdk-bedrock-runtime / smithy-python) からしか呼び出せません。
 この SDK の標準クレデンシャルチェーンは、環境変数・静的キー・credential_process
 にしか対応しておらず、以下の認証方式ではそのままだと失敗します。
@@ -26,17 +26,32 @@ from typing import Any
 # このハンズオンで利用するリージョン / モデル
 DEFAULT_REGION = "ap-northeast-1"
 SUPPORTED_REGIONS = ("us-east-1", "us-west-2", "ap-northeast-1", "eu-north-1")
-MODEL_ID = "amazon.nova-2-sonic-v1:0"
+# Nova 2.5 Sonic のモデル ID (Nova 2 Sonic は "amazon.nova-2-sonic-v1:0")。
+# アカウント/リージョンで直接呼び出せない場合は、環境変数でクロスリージョン推論
+# プロファイル (例: us.amazon.nova-2-5-sonic) などに切り替えられる。
+DEFAULT_MODEL_ID = "amazon.nova-2-5-sonic"
+MODEL_ID = os.environ.get("NOVA_SONIC_MODEL_ID") or DEFAULT_MODEL_ID
 
 
 def resolve_region() -> str:
     """AWS_REGION → AWS_DEFAULT_REGION → ap-northeast-1 の順でリージョンを決める
 
     プロファイルの region はあえて使いません。Identity Center のプロファイルは
-    Nova 2 Sonic 非対応リージョン (例: ap-northeast-3) が設定されていることが多く、
+    Nova 2.5 Sonic 非対応リージョン (例: ap-northeast-3) が設定されていることが多く、
     ハンズオンの再現性が落ちるためです。
     """
     return os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or DEFAULT_REGION
+
+
+def model_resource_arns() -> str:
+    """IAM ポリシーに書く対象リソース (表示用)"""
+    region = resolve_region()
+    if MODEL_ID.startswith("amazon."):
+        return f"arn:aws:bedrock:{region}::foundation-model/{MODEL_ID}"
+    # クロスリージョン推論プロファイルは、プロファイル自体と転送先の基盤モデルの両方に権限が必要
+    base = MODEL_ID.split(".", 1)[1]
+    return (f"arn:aws:bedrock:{region}:<アカウントID>:inference-profile/{MODEL_ID} と "
+            f"arn:aws:bedrock:*::foundation-model/{base}")
 
 
 def profile_label() -> str:
@@ -92,7 +107,7 @@ def create_credentials_resolver(session=None):
 
 
 async def create_bedrock_runtime_client():
-    """Nova 2 Sonic 用の AsyncBedrockRuntimeClient を生成する
+    """Nova 2.5 Sonic 用の AsyncBedrockRuntimeClient を生成する
 
     - 認証: boto3 のクレデンシャル解決を使う (Identity Center / aws login などに対応)
     - 通信: AWS CRT の HTTP クライアントを使う。aws-sdk-bedrock-runtime 0.11 以降の
@@ -218,20 +233,24 @@ def describe_error(exc: BaseException) -> dict:
         return result(
             "IAM の権限が不足しています。",
             [
-                "必要な権限: bedrock:InvokeModel"
-                f" (対象: arn:aws:bedrock:{resolve_region()}::foundation-model/{MODEL_ID})。"
+                "必要な権限: bedrock:InvokeModel (対象: " + model_resource_arns() + ")。"
                 "双方向ストリーミング API もこのアクションで認可されます。",
                 "IAM Identity Center の場合は、許可セット (Permission set) にこの権限を追加し、"
                 "アカウントへ再プロビジョニングしてください。",
                 "SCP や許可の境界 (Permissions boundary) で Bedrock が拒否されていないかも確認してください。",
             ],
+            "permission",
         )
 
     # ── リージョン・モデル
     if any(k in haystack for k in ("ResourceNotFound", "model identifier is invalid", "isn't supported", "not supported in this region")):
         return result(
             f"リージョン {resolve_region()} では {MODEL_ID} を利用できません。",
-            [f"対応リージョン: {', '.join(SUPPORTED_REGIONS)}", "環境変数 AWS_REGION で変更してください。"], "region")
+            [
+                f"対応リージョン: {', '.join(SUPPORTED_REGIONS)}。環境変数 AWS_REGION で変更してください。",
+                "対応リージョンでも直接呼び出せない場合は、クロスリージョン推論プロファイルを試してください"
+                " (例: us-east-1 / us-west-2 なら NOVA_SONIC_MODEL_ID=us.amazon.nova-2-5-sonic)。",
+            ], "region")
     if "ValidationException" in haystack:
         return result(
             "リクエストの内容が不正です。Settings の Session Config / Prompt Config を見直してください。",
@@ -244,7 +263,7 @@ def describe_error(exc: BaseException) -> dict:
             ["少し時間を置いてから再度 Start してください。", "同時セッション数のクォータは Service Quotas で確認できます。"], "service")
     if any(k in haystack for k in ("ModelTimeout", "timed out", "Timeout")):
         return result(
-            "Nova 2 Sonic のセッションがタイムアウトしました。",
+            "Nova 2.5 Sonic のセッションがタイムアウトしました。",
             ["無音が長く続く、または 1 接続の上限時間 (8 分) に達すると切断されます。Start し直してください。"], "timeout")
     if any(k in haystack for k in ("ServiceUnavailable", "InternalServer", "ModelStreamError")):
         return result("Bedrock 側で一時的なエラーが発生しました。", ["少し時間を置いてから再度 Start してください。"], "service")

@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""AWS Deep Cuts - Amazon Nova 2 Sonic セットアップ + サーバー起動
+"""AWS Deep Cuts - Amazon Nova 2.5 Sonic セットアップ + サーバー起動
 
 このスクリプトは以下を行います:
   1. Python バージョン確認 (3.12 以上)
   2. Python 依存パッケージ確認/インストール
   3. AWS 認証確認 (アクセスキー / IAM Identity Center / aws login / AssumeRole など)
-  4. Nova 2 Sonic の呼び出し確認 (権限・リージョン)
-  5. Nova 2 Sonic からのあいさつ (AI から一言話して終わる)
+  4. Nova 2.5 Sonic の呼び出し確認 (権限・リージョン)
+  5. Nova 2.5 Sonic からのあいさつ (AI から一言話して終わる)
   6. WebSocket 中継サーバーの起動
 
 前提:
@@ -65,7 +65,7 @@ def check_python():
     need = ".".join(map(str, MIN_PYTHON))
     lines = [
         f"❌ Python {need} 以上が必要です (現在: {version})",
-        "   Nova 2 Sonic の双方向ストリーミングに使う aws-sdk-bedrock-runtime が",
+        "   Nova 2.5 Sonic の双方向ストリーミングに使う aws-sdk-bedrock-runtime が",
         f"   Python {need} 以上にしか対応していないためです。",
         "",
         "   対処:",
@@ -188,7 +188,7 @@ def check_auth():
     print(f"  認証方式: {method_label}")
 
 
-# ─── Step 4: Nova 2 Sonic 呼び出し確認 ───────────────────────────
+# ─── Step 4: Nova 2.5 Sonic 呼び出し確認 ───────────────────────────
 async def _probe_stream():
     """双方向ストリームを実際に開き、認証・権限・リージョンのエラーが出ないか確かめる"""
     import asyncio
@@ -244,7 +244,7 @@ def check_model():
 
     region = aws_auth.resolve_region()
     if region not in aws_auth.SUPPORTED_REGIONS:
-        print(f"  ⚠️  {region} は Nova 2 Sonic の対応リージョンではない可能性があります")
+        print(f"  ⚠️  {region} は Nova 2.5 Sonic の対応リージョンではない可能性があります")
         print(f"     対応: {', '.join(aws_auth.SUPPORTED_REGIONS)}")
 
     async def _main():
@@ -281,7 +281,7 @@ def main():
 
     print()
     hr()
-    print("  AWS Deep Cuts - Amazon Nova 2 Sonic")
+    print("  AWS Deep Cuts - Amazon Nova 2.5 Sonic")
     hr()
     print()
 
@@ -305,14 +305,14 @@ def main():
     check_auth()
     print()
 
-    print("Step 4/6: Nova 2 Sonic の呼び出しを確認")
+    print("Step 4/6: Nova 2.5 Sonic の呼び出しを確認")
     if skip_check:
         print("  --skip-check が指定されたためスキップしました")
     else:
         check_model()
     print()
 
-    print("Step 5/6: Nova 2 Sonic からのあいさつ")
+    print("Step 5/6: Nova 2.5 Sonic からのあいさつ")
     if skip_welcome:
         print("  スキップしました")
     else:

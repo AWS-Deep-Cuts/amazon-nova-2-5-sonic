@@ -1,12 +1,13 @@
-# Amazon Nova 2 Sonic を「動かして」分かった、speech-to-speech アプリ実装の勘所 ― 双方向ストリーミング・barge-in・認証の落とし穴まで【AWS Deep Cuts】
+# Amazon Nova 2.5 Sonic を「動かして」分かった、speech-to-speech アプリ実装の勘所 ― Nova 2 からの移行・barge-in・認証の落とし穴まで【AWS Deep Cuts】
 
 > **レベル**: 200〜300（Amazon Bedrock を触ったことがあり、非同期 I/O や WebSocket の基本が分かる方向け）
 > **ハンズオン教材**: https://github.com/AWS-Deep-Cuts/amazon-nova-2-sonic
 
 ## TL;DR
 
-- Amazon Nova 2 Sonic は、音声認識・推論・音声合成を **1 つのモデル** で行う speech-to-speech 基盤モデル。API は HTTP/2 上の **双方向イベントストリーム** (`InvokeModelWithBidirectionalStream`) で、「リクエストを投げて結果を待つ」従来の生成 AI API とは設計の前提がまるで違う。
-- ドキュメントを読んだだけでは分からず、実際に作って初めて踏んだ落とし穴がいくつもあった。
+- Amazon Nova 2.5 Sonic（2026 年 10 月 GA）は、音声認識・推論・音声合成を **1 つのモデル** で行う speech-to-speech 基盤モデル。API は HTTP/2 上の **双方向イベントストリーム** (`InvokeModelWithBidirectionalStream`) で、「リクエストを投げて結果を待つ」従来の生成 AI API とは設計の前提がまるで違う。
+- 前世代の Nova 2 Sonic とは API・voiceId・対応言語が共通。移行の中心は **モデル ID の変更**（`amazon.nova-2-5-sonic`。`-v1:0` が付かない）と、**より指示に忠実で簡潔になったモデルに合わせたプロンプトの見直し**。モデル ID を書いた IAM ポリシーの更新も忘れやすい。
+- ドキュメントを読んだだけでは分からず、実際に作って初めて踏んだ落とし穴がいくつもあった（いずれも Nova 2 Sonic で作り込んだときのもので、API が共通の 2.5 にもそのまま当てはまる）。
   - システムプロンプトに「先に話して」と書いても、AI は先に話さない（ユーザー入力が発火トリガー）
   - barge-in はモデル側で止まっても、**クライアントに溜まった音声が鳴り続ける**
   - 字幕が二重に出る（`SPECULATIVE` と `FINAL`）
@@ -17,13 +18,13 @@
 
 ## はじめに
 
-AWS Deep Cuts は、AWS の中でも情報が少ない「隠れた名曲 = Deep Cuts」を、前提知識からハンズオンまで掘り下げるシリーズです。今回は Amazon Nova 2 Sonic を取り上げます。
+AWS Deep Cuts は、AWS の中でも情報が少ない「隠れた名曲 = Deep Cuts」を、前提知識からハンズオンまで掘り下げるシリーズです。今回は Amazon Nova 2.5 Sonic を取り上げます。
 
-この記事は公式ドキュメントの要約ではありません。ローカル PC 上に「プロンプトや設定を書き換えながら Nova 2 Sonic と話せるプレイグラウンド」を作り、動かしながら何度も作り直した過程で **気付いたこと・つまずいたこと・設計判断の理由** を中心にまとめています。仕様の記述は、2026 年 9 月時点の公式ドキュメントで確認できた範囲に限っています。
+この記事は公式ドキュメントの要約ではありません。ローカル PC 上に「プロンプトや設定を書き換えながら Nova Sonic と話せるプレイグラウンド」を作り、動かしながら何度も作り直した過程で **気付いたこと・つまずいたこと・設計判断の理由** を中心にまとめています。プレイグラウンドは最初 Nova 2 Sonic で作り込み、2026 年 10 月の Nova 2.5 Sonic の GA に合わせて移行しました。仕様の記述は、2026 年 10 月時点の公式ドキュメントと、AWS 公式サンプルリポジトリ（[aws-samples/amazon-nova-samples](https://github.com/aws-samples/amazon-nova-samples)）の移行ガイドで確認できた範囲に限っています。
 
 ---
 
-## 1. Nova 2 Sonic とは何か ― 「3 段パイプライン」との違い
+## 1. Nova 2.5 Sonic とは何か ― 「3 段パイプライン」との違い
 
 従来の音声対話は、次の 3 段パイプラインで作るのが定番でした。
 
@@ -37,13 +38,13 @@ AWS Deep Cuts は、AWS の中でも情報が少ない「隠れた名曲 = Deep 
 2. **ターン管理を自前で作る必要がある**: 「ユーザーが話し終わったか」の判定 (endpointing) と、AI の発話中にユーザーが割り込んだときの処理 (barge-in) を、各サービスの外側で実装しなければならない。
 3. **レイテンシが直列に積み上がる**: 3 つの処理を順番に待つ。
 
-Nova 2 Sonic はこれを 1 つのモデルにまとめます。音声を入れると、応答の **テキスト（字幕）と音声が同時にストリームで返って** きます。公式には「入力音声の prosody（ペースや音色）に基づいて応答のデリバリーを動的に調整する（Adaptive speech response）」と説明されており、ユーザーが元気に話しかければ元気に、ぼそぼそ話せば落ち着いたトーンで返ってきます。これは 3 段パイプラインでは原理的に再現できない挙動です。
+Nova Sonic はこれを 1 つのモデルにまとめます。音声を入れると、応答の **テキスト（字幕）と音声が同時にストリームで返って** きます。公式には「入力音声の prosody（ペースや音色）に基づいて応答のデリバリーを動的に調整する（Adaptive speech response）」と説明されており、ユーザーが元気に話しかければ元気に、ぼそぼそ話せば落ち着いたトーンで返ってきます。これは 3 段パイプラインでは原理的に再現できない挙動です。
 
 ### 1.1 押さえておきたい仕様
 
 | 項目 | 内容 |
 | -- | -- |
-| モデル ID | `amazon.nova-2-sonic-v1:0` |
+| モデル ID | `amazon.nova-2-5-sonic`（Nova 2 Sonic は `amazon.nova-2-sonic-v1:0`） |
 | API | `InvokeModelWithBidirectionalStream`（HTTP/2 双方向イベントストリーム） |
 | 必要な IAM アクション | `bedrock:InvokeModel`（API リファレンスに記載） |
 | 音声入力 | LPCM / 16bit / モノラル / base64。サンプリングレートは 8kHz・16kHz・24kHz |
@@ -54,13 +55,28 @@ Nova 2 Sonic はこれを 1 つのモデルにまとめます。音声を入れ�
 
 > Bedrock のモデルアクセスは 2025 年 10 月から自動有効化になり、「モデルアクセス」画面での申請は不要になりました。アクセス制御は IAM と SCP で行います。私も最初は旧来の手順で「モデルアクセスを有効化してください」と README に書いていて、後から削除しました。古いブログ記事を参考にする場合は注意してください。
 
-**日本語は 2026 年 9 月時点でサポート言語に含まれていません。** ハンズオンで「日本語で答えて」と指示すると、英語にフォールバックしたり、発音が不安定になったりします。日本語のプロダクトにそのまま使えるわけではない点は、先に知っておくべき制約です。
+**日本語は 2026 年 10 月時点でもサポート言語に含まれていません**（Nova 2.5 Sonic の対応言語は Nova 2 Sonic と同じ）。Nova 2 Sonic のハンズオンで「日本語で答えて」と指示すると、英語にフォールバックしたり、発音が不安定になったりします。日本語のプロダクトにそのまま使えるわけではない点は、先に知っておくべき制約です。
+
+### 1.2 Nova 2 Sonic から何が変わったか
+
+Nova 2.5 Sonic は 2026 年 10 月 5 日に GA となった、Nova Sonic の「推論強化版」です。AWS 公式サンプルリポジトリの移行ガイド（Getting Started / Migrating to Nova 2.5 Sonic）には、Nova 2 Sonic との比較が次のように載っています。
+
+| 観点 | Nova 2 Sonic 比 |
+| -- | -- |
+| 指示追従（Audio MultiChallenge） | +43% |
+| ツール呼び出し（ComplexFuncBench） | +25% |
+| マルチステップのタスク完遂（tau3-bench） | +20% |
+| 最初の音声が出るまで（TTFA）P50 | 1.50 秒 → 1.08 秒（-28%） |
+| 同 P99 | 2.45 秒 → 1.45 秒（-41%） |
+| トークン単価 | 同じ（応答が簡潔になるぶん、1 時間あたりのコストは下がる見込み） |
+
+一方で、**API、voiceId、対応言語は Nova 2 Sonic と共通** です。イベントの形もそのままなので、移行は「モデル ID の変更」と「プロンプトの見直し」が中心になります。ガイドでも、移行で問題が起きる主な原因はモデルの差し替えそのものではなく、**2.5 が指示をより文字どおりに守り、より簡潔に答えるようになったことによるプロンプトとのズレ** だと説明されています。実際に移行して気付いた点は、5 章にまとめました。
 
 ---
 
 ## 2. プロトコルを理解する ― 「イベントの入れ子」がすべて
 
-Nova 2 Sonic の API を最初に読んだとき、戸惑ったのはイベントの多さでした。ただ、構造は単純な **3 階層の入れ子** です。
+Nova Sonic の API を最初に読んだとき、戸惑ったのはイベントの多さでした。ただ、構造は単純な **3 階層の入れ子** です。
 
 ```text
 sessionStart            … 推論パラメータ、ターン検出の感度
@@ -90,11 +106,11 @@ sessionEnd
 
 ## 3. 実装してみて分かったこと
 
-ここからが本題です。ハンズオン用プレイグラウンドは、以下の構成で作りました。
+ここからが本題です。この章の体験は、Nova 2 Sonic でプレイグラウンドを作り込んだときのものです。Nova 2.5 Sonic でもイベントの仕様は同じなので、クライアント側の学びはそのまま通用します。ハンズオン用プレイグラウンドは、以下の構成で作りました。
 
 ```text
 ┌──────────────┐  WebSocket (127.0.0.1)  ┌──────────────┐  HTTP/2 双方向ストリーム  ┌──────────────┐
-│  index.html  │ ◀────────────────────▶ │  server.py   │ ◀──────────────────────▶ │ Nova 2 Sonic │
+│  index.html  │ ◀────────────────────▶ │  server.py   │ ◀──────────────────────▶ │Nova 2.5 Sonic│
 │  (ブラウザ)   │  PCM 16kHz / 24kHz      │  (中継)       │                          │  (Bedrock)   │
 │  マイク/再生  │                         │  ツール実行   │ ── HTTP ──▶ 気象庁 API   │              │
 └──────────────┘                         └──────────────┘                          └──────────────┘
@@ -106,7 +122,7 @@ sessionEnd
 
 実は最初の版は、このシリーズの他のハンズオン（Entity Resolution、Local Zones）と同じく、CloudShell でスクリプトを実行して結果を確認する形式でした。事前に用意した音声ファイルを送り、返ってきた音声を WAV にして HTML に埋め込み、ダウンロードして聴く、という流れです。
 
-動きはしたのですが、作ってみて **これでは Nova 2 Sonic の価値がまったく伝わらない** と気付きました。録音済みの音声を投げて返事を聴くだけなら、3 段パイプラインと体験が変わりません。割り込み、ためらいへの反応、声のトーンへの追従といった、このモデルならではの特性は **リアルタイムで会話して初めて体感できる** ものです。そこで、ローカル PC のマイクで会話するプレイグラウンド形式に作り直しました。
+動きはしたのですが、作ってみて **これでは Nova Sonic の価値がまったく伝わらない** と気付きました。録音済みの音声を投げて返事を聴くだけなら、3 段パイプラインと体験が変わりません。割り込み、ためらいへの反応、声のトーンへの追従といった、このモデルならではの特性は **リアルタイムで会話して初めて体感できる** ものです。そこで、ローカル PC のマイクで会話するプレイグラウンド形式に作り直しました。
 
 その過程で、Windows の Git Bash や WSL から Windows 側の `aws.exe` を呼ぶと引数が壊れる問題にも当たりました。受講者の OS を選ばないように、セットアップを bash から Python（`setup.py`）に書き直しています。
 
@@ -119,7 +135,7 @@ You are a friendly English tutor. As soon as the session begins, greet the stude
 Do not wait for the user to speak first.
 ```
 
-実際には、**何も話さなければ AI は沈黙したまま** です。Nova 2 Sonic は、ユーザーからの入力（音声、またはテキスト）があって初めて応答を生成します。システムプロンプトは「何を話すか」は決めても、「いつ話し始めるか」は決めません。
+実際には、**何も話さなければ AI は沈黙したまま** です。Nova Sonic は、ユーザーからの入力（音声、またはテキスト）があって初めて応答を生成します。システムプロンプトは「何を話すか」は決めても、「いつ話し始めるか」は決めません。
 
 AI から話し始めさせるには、公式ドキュメントの **Cross-modal input** を使います。音声ストリームを開いたまま、`role: USER`・`interactive: true` の **テキスト** content を差し込みます。
 
@@ -145,9 +161,9 @@ async def inject_text(self, text: str):
 
 ### 3.3 barge-in は「モデルが止まっても、音は止まらない」
 
-Nova 2 Sonic は barge-in（AI の発話中の割り込み）にネイティブ対応しています。AI が話している最中にユーザーが話し始めると、モデルは生成を中断し、`contentEnd` に `stopReason: "INTERRUPTED"` を付けて知らせます。会話のコンテキストは保持されます。
+Nova Sonic は barge-in（AI の発話中の割り込み）にネイティブ対応しています。AI が話している最中にユーザーが話し始めると、モデルは生成を中断し、`contentEnd` に `stopReason: "INTERRUPTED"` を付けて知らせます。会話のコンテキストは保持されます。
 
-ところが、最初の実装では **割り込んでも AI の声が数秒間鳴り続けました。** 原因はモデルではなくクライアントです。Nova 2 Sonic は音声を **実時間より速く** 生成して送ってくるため、ブラウザ側には再生待ちの音声が溜まっています。モデルが生成をやめても、すでに受け取った分は再生されてしまいます。
+ところが、最初の実装では **割り込んでも AI の声が数秒間鳴り続けました。** 原因はモデルではなくクライアントです。Nova Sonic は音声を **実時間より速く** 生成して送ってくるため、ブラウザ側には再生待ちの音声が溜まっています。モデルが生成をやめても、すでに受け取った分は再生されてしまいます。
 
 公式ドキュメントにも、クライアント側で再生を止めてキューを破棄する必要があると書かれています。つまり、**barge-in はモデルとクライアントの共同作業** です。
 
@@ -168,13 +184,13 @@ function clearAudioQueue() {
 
 Web Audio API で「前の再生が終わる時刻 (`nextPlayTime`) に次のチャンクを予約する」方式で再生している場合、予約済みのノードへの参照を持っておかないと止められません。音声の再生キューは、最初から **止められる前提** で設計しておくべきだと学びました。
 
-これを直すと、「長い物語を話させている途中で『Stop! 猫の名前は何だった？』と割り込む」操作で、AI が即座に黙り、中断前の話を踏まえて答えるようになります。ハンズオンの中でも、特に Nova 2 Sonic らしさを体感できる操作です。
+これを直すと、「長い物語を話させている途中で『Stop! 猫の名前は何だった？』と割り込む」操作で、AI が即座に黙り、中断前の話を踏まえて答えるようになります。ハンズオンの中でも、特に Nova Sonic らしさを体感できる操作です。
 
 ### 3.4 字幕が二重に出る ― `SPECULATIVE` と `FINAL`
 
 AI の発話テキストをログに出すと、**同じ文が 2 回表示** されました。
 
-Nova 2 Sonic の ASSISTANT 側のテキストには 2 種類あります。`contentStart` の `additionalModelFields` に入っている `generationStage` で区別します。
+Nova Sonic の ASSISTANT 側のテキストには 2 種類あります。`contentStart` の `additionalModelFields` に入っている `generationStage` で区別します。
 
 | generationStage | 意味 | 届くタイミング |
 | -- | -- | -- |
@@ -205,13 +221,13 @@ if role == "ASSISTANT" and self._content_stages.get(content_name) == "FINAL":
 
 一方で、**ユーザー自身がゆっくり話すと、AI の応答もやや落ち着いたペースになります。** これは前述の Adaptive speech response の効果です。つまり速度は「命令」するものではなく、「入力の話し方で誘導」するものです。
 
-それでも確実にゆっくり聴きたい場合に備えて、プレイグラウンドにはクライアント側の再生速度スライダー（`AudioBufferSourceNode.playbackRate`）を付けました。ただし **`playbackRate` は再生速度と一緒に音程も変える** ので、0.7 倍程度まで落とすと声が低くこもって聞こえます。音程を保ったまま速度だけを変えるには、Time-stretch（WSOLA など）の処理を自前で入れる必要があります。プロダクトで本格的に対応するなら、この点は工数として見込んでおくべきです。
+それでも確実にゆっくり聴きたい場合に備えて、プレイグラウンドにはクライアント側の再生速度スライダー（`AudioBufferSourceNode.playbackRate`）を付けました。ただし **`playbackRate` は再生速度と一緒に音程も変える** ので、0.7 倍程度まで落とすと声が低くこもって聞こえます。音程を保ったまま速度だけを変えるには、Time-stretch（WSOLA など）の処理を自前で入れる必要があります。プロダクトで本格的に対応するなら、この点は工数として見込んでおくべきです。Nova 2.5 Sonic でも API は共通で、話す速さを指定するパラメータは追加されていません。
 
 ### 3.6 Tool use は「受信ループを止めない」ことが重要
 
 Tool use の流れ自体は Converse API とよく似ています。モデルが `toolUse` イベント（`toolName`, `toolUseId`, `content` = 引数の JSON）を送ってきたら、クライアントは `type: TOOL`・`role: TOOL` の content として `toolResult` を返します。
 
-音声ならではの注意点は、**ツールの実行中も双方向ストリームは流れ続けている** ことです。Nova 2 Sonic は非同期のツール呼び出しに対応しており、ツールの実行中もユーザーの新しい入力に応答し続けます。
+音声ならではの注意点は、**ツールの実行中も双方向ストリームは流れ続けている** ことです。Nova Sonic は非同期のツール呼び出しに対応しており、ツールの実行中もユーザーの新しい入力に応答し続けます。
 
 最初の実装では、レスポンスの受信ループの中で気象庁 API を同期的に呼んでいました（`urllib` による同期 I/O）。そのため、API の応答を待つ間は受信ループ全体が止まっていました。ツールの実行は別タスクに切り出し、同期 I/O はスレッドに逃がすのが正解です。
 
@@ -232,7 +248,7 @@ data = await asyncio.to_thread(_fetch_json, url)
 
 ---
 
-## 4. Python SDK と認証の落とし穴（2026 年 9 月時点）
+## 4. Python SDK と認証の落とし穴（2026 年 10 月時点）
 
 ここは、ハンズオンを「誰の環境でも動く」ようにする過程で一番時間を使った部分です。
 
@@ -244,7 +260,7 @@ data = await asyncio.to_thread(_fetch_json, url)
 
 ### 4.2 既定のトランスポートでは双方向ストリームが開けない
 
-`aws-sdk-bedrock-runtime` 0.11 系では、既定の HTTP クライアントが aiohttp になっています。これは双方向ストリーミング（HTTP/2 で送受信を同時に行う duplex 通信）に対応していないため、Nova 2 Sonic を呼ぶと次のエラーになります。
+`aws-sdk-bedrock-runtime` 0.11 系では、既定の HTTP クライアントが aiohttp になっています。これは双方向ストリーミング（HTTP/2 で送受信を同時に行う duplex 通信）に対応していないため、Nova Sonic を呼ぶと次のエラーになります。
 
 ```text
 UnsupportedTransportError: The configured transport (AIOHTTPClient) does not support
@@ -264,7 +280,7 @@ config = await AsyncBedrockRuntimeConfig.resolve(
 client = AsyncBedrockRuntimeClient(config=config)
 ```
 
-トランスポートを指定していない古いバージョン前提のサンプルコードは、最新の SDK ではそのままでは動きません。**SDK のバージョンを固定しないと、ある日突然動かなくなる** 典型例だと思います。
+トランスポートを指定していない古いバージョン前提のサンプルコードは、最新の SDK ではそのままでは動きません。**SDK のバージョンを固定しないと、ある日突然動かなくなる** 典型例だと思います。Nova 2.5 Sonic の公式移行ガイドでも、「Nova Sonic には duplex 対応の HTTP トランスポート（AWS CRT）が必要で、aiohttp ではない」ことが既知の注意点として挙げられています。
 
 ### 4.3 IAM Identity Center (SSO) のプロファイルでは認証が通らない
 
@@ -322,7 +338,7 @@ while True:
     await self._handle_output(json.loads(result.value.bytes_.decode("utf-8")))
 ```
 
-ハンズオンでは、これらの例外を「何が起きたか」「どうすればよいか」の形に変換して、ブラウザとターミナルの両方に表示しています。たとえば SSO セッションが切れていれば `aws sso login --profile xxx` を、権限不足なら必要なアクションと対象 ARN、Identity Center の許可セットの確認を案内します。**音声アプリは「何も起きない」ことが最悪の失敗体験** です。マイクに話しかけても無反応、では受講者は何を疑えばよいか分かりません。
+ハンズオンでは、これらの例外を「何が起きたか」「どうすればよいか」の形に変換して、ブラウザとターミナルの両方に表示しています。たとえば SSO セッションが切れていれば `aws sso login --profile xxx` を、権限不足なら必要なアクションと対象 ARN、Identity Center の許可セットの確認を案内します。**音声アプリは「何も起きない」ことが最悪の失敗体験** です。マイクに話しかけても無反応、では受講者は何を疑えばよいか分かりません。公式の移行ガイドにも、フレームワークによっては認証情報の誤りが例外にならず、`receive()` でイベントを待ったまま無反応になることがある、という注意書きがあります。エラーを確実に表面化させる作りは、どの実装でも意識しておく価値があります。
 
 ### 4.5 localhost の WebSocket は、それだけでは安全ではない
 
@@ -339,20 +355,64 @@ server = await serve(handle_connection, "127.0.0.1", 8765, origins=ALLOWED_ORIGI
 
 ---
 
-## 5. 8 分の壁と、セッション設計
+## 5. Nova 2 Sonic から 2.5 Sonic へ移行してみて
 
-1 本のストリームは **8 分で切断** されます。短い問い合わせ対応なら問題ありませんが、英会話レッスンのように長く話す用途では必ずぶつかります。
+ハンズオンも Nova 2.5 Sonic に移行しました。API が共通なのでコードの変更はわずかでしたが、それでも気を付けるべき点がいくつかありました。
+
+### 5.1 モデル ID の形式が変わった
+
+| モデル | モデル ID |
+| -- | -- |
+| Nova 2 Sonic | `amazon.nova-2-sonic-v1:0` |
+| Nova 2.5 Sonic | `amazon.nova-2-5-sonic` |
+
+2.5 には **`-v1:0` のようなバージョン接尾辞が付きません**。旧 ID の感覚で `amazon.nova-2-5-sonic-v1:0` と書くと、存在しない ID になります。ハンズオンではモデル ID を 1 か所（`aws_auth.py`）にまとめていたので、変更は 1 行で済みました。さらに環境変数 `NOVA_SONIC_MODEL_ID` で上書きできるようにして、**同じプロンプトのまま 2 と 2.5 を聴き比べられる** ようにしています。公式ガイドには、アカウントやリージョンによって直接呼び出せない場合はクロスリージョン推論プロファイル（`us.amazon.nova-2-5-sonic`）を試すように、とも書かれています。
+
+### 5.2 IAM ポリシーも「モデル ID 込み」で更新が必要
+
+最小権限の IAM ポリシーでは、`Resource` に基盤モデルの ARN（`arn:aws:bedrock:*::foundation-model/amazon.nova-2-sonic-v1:0`）を書いているはずです。**コードだけ 2.5 に変えると、このポリシーに一致せず `AccessDeniedException` になります。** IAM Identity Center の許可セットでモデルを絞っている組織では、アプリの変更と許可セットの更新（と再プロビジョニング）をセットで計画する必要があります。クロスリージョン推論プロファイルを使う場合は、プロファイルの ARN と転送先の基盤モデルの ARN の両方に権限が必要です。ハンズオンのエラー表示も、使っているモデル ID に合わせて対象 ARN を案内するようにしました。
+
+### 5.3 プロンプトは「否定形」を避けて書き直す
+
+2.5 で一番大きいのはプロンプトの扱いです。AWS 公式の Nova Sonic 2.5 プロンプトガイドでは、次のような考え方が最初に示されています。
+
+- **コンテキストにあるものは、何でも発話されうる。** 「〜とは言わないで」と書くと、その言葉自体が文脈に入り、かえって発話されやすくなる。望む振る舞いを肯定形で書く。
+- 「never」「always」「do not」のような強い表現は、2.5 では **より文字どおりに** 守られる。2 の冗長さを抑えるために入れた強い指示が、2.5 では効きすぎる。
+- 箇条書きで 1 行 1 ルールにし、指示は 1 回だけ明確に書く。
+
+ハンズオンには、`setup.py` の完了時に AI から「Welcome to AWS Deep Cuts!」と一言あいさつさせる処理（Cross-modal input による Model-start-first の応用）があります。このシステムプロンプトも、ガイドに沿って書き直しました。
+
+```text
+# Before（Nova 2 Sonic 向けに書いたもの）
+... say exactly the following sentence ..., and nothing else: "Welcome to AWS Deep Cuts! ..."
+Do not ask any questions and do not add anything before or after it.
+
+# After（Nova 2.5 Sonic 向け）
+You are the cheerful voice of AWS Deep Cuts, a tech series that digs deep into hidden gems of AWS.
+- When the session starts, greet the listener with exactly this one sentence, in an energetic tone: "Welcome to AWS Deep Cuts! ..."
+- That single sentence is your whole reply; end your turn right after it.
+```
+
+「質問しないで」「前後に何も足さないで」と禁止事項を並べるのをやめ、「この 1 文が返答のすべてで、言い終えたらターンを終える」と **望む状態** を書いています。音声モデルのプロンプトは、テキストのチャットボット以上に「書いたことが口に出る」ものとして扱うべきだ、というのが移行作業での一番の気付きでした。
+
+なお、応答の簡潔さやレイテンシの改善が実際の会話でどう聞こえるかは、使い方によって大きく変わります。ハンズオンでは `NOVA_SONIC_MODEL_ID` を切り替えるだけで両モデルを試せるので、ぜひ自分の耳で聴き比べてみてください。
+
+---
+
+## 6. 8 分の壁と、セッション設計
+
+1 本のストリームは **8 分で切断** されます。この上限は Nova 2.5 Sonic でも変わっていません。短い問い合わせ対応なら問題ありませんが、英会話レッスンのように長く話す用途では必ずぶつかります。
 
 プレイグラウンドでは、経過時間を表示して 7 分 30 秒で警告を出し、切断後は Start で再開する、という素朴な作りにしています。プロダクトで途切れなく続けるなら、次のような設計が必要になります。
 
 - 上限の少し前に **新しいストリームを裏で開き**、それまでの会話履歴を `interactive: false` のテキスト content（USER / ASSISTANT のロール付き）として渡して文脈を引き継ぐ
 - AI の発話中に切り替えないよう、`END_TURN` の直後など **ターンの切れ目を狙って** 切り替える
 
-Nova 2 Sonic はコンテキストウィンドウ自体は大きいので、履歴を渡すこと自体は難しくありません。むしろ **いつ・どう切り替えればユーザーに気付かれないか** という UX 設計が本質的な課題です。
+Nova Sonic はコンテキストウィンドウ自体は大きいので、履歴を渡すこと自体は難しくありません。むしろ **いつ・どう切り替えればユーザーに気付かれないか** という UX 設計が本質的な課題です。
 
 ---
 
-## 6. ハンズオンで体験できること
+## 7. ハンズオンで体験できること
 
 リポジトリのプレイグラウンドでは、プロンプトと設定 JSON を書き換えながら、以下の 8 つの観点を確認できます。
 
@@ -370,22 +430,23 @@ Nova 2 Sonic はコンテキストウィンドウ自体は大きいので、履�
 ```bash
 git clone https://github.com/AWS-Deep-Cuts/amazon-nova-2-sonic.git
 cd amazon-nova-2-sonic/hands-on
-python setup.py   # Python 3.12 以上。認証・権限・リージョンを確認してサーバーを起動
+python setup.py   # Python 3.12 以上。認証・権限・リージョンを確認し、AI のあいさつの後にサーバーを起動
 # → index.html をブラウザ (Chrome / Edge) で開く
 ```
 
-Nova 2 Sonic は Bedrock のオンデマンド API なので、作成する AWS リソースはありません。料金は入力・出力の音声トークン、テキストトークンの量に応じた従量課金です。最新の単価は [Amazon Bedrock の料金ページ](https://aws.amazon.com/bedrock/pricing/) で確認してください。
+Nova 2.5 Sonic は Bedrock のオンデマンド API なので、作成する AWS リソースはありません。料金は入力・出力の音声トークン、テキストトークンの量に応じた従量課金です。最新の単価は [Amazon Bedrock の料金ページ](https://aws.amazon.com/bedrock/pricing/) で確認してください。
 
 ---
 
-## 7. まとめ ― 実際に作ってみて
+## 8. まとめ ― 実際に作ってみて
 
-- Nova 2 Sonic の本質は「音声認識と合成が速くなった」ことではなく、**韻律を含めた音声のままの理解と、ターン管理がモデルに内蔵された** ことにある。これはリアルタイムで会話して初めて実感できる。
+- Nova Sonic の本質は「音声認識と合成が速くなった」ことではなく、**韻律を含めた音声のままの理解と、ターン管理がモデルに内蔵された** ことにある。これはリアルタイムで会話して初めて実感できる。
 - ただし「モデルに内蔵」されていても、**クライアントの責務は減らない。** barge-in 時の再生キューの破棄、`SPECULATIVE` / `FINAL` の使い分け、ツール実行中も止めない受信ループ、8 分上限の切り替えは、どれもアプリ側の設計で品質が決まる。
 - ドキュメントから「できそう」に見えたことの中に、**実際にはできないこと**（システムプロンプトだけで先に話させる、プロンプトで速度を変える、日本語で話す）があった。PoC の最初の 1 時間で必ず確かめておくべきポイント。
 - Python SDK はまだ 1.0 未満で、**Python 3.12 必須・CRT トランスポート指定・SSO 非対応の既定チェーン** という 3 つの落とし穴がある。社内の Identity Center 環境で PoC をする場合は、最初にここを片付けておくと時間を無駄にしない。
+- Nova 2 → 2.5 の移行は、コード上はモデル ID の変更でほぼ済む。ただし **IAM ポリシーのモデル ARN** と、**指示に忠実になったモデルに合わせたプロンプト（否定形を避ける）** の 2 点は、事前に計画しておくべき。
 
-音声 UI は、テキストのチャットボットよりも「待たされる」「無視される」ことへの許容度がずっと低いインターフェースです。Nova 2 Sonic はその土台をモデル側で大きく引き上げてくれますが、最後の体験を決めるのはやはりアプリケーションの作り込みだ、というのが一番の学びでした。
+音声 UI は、テキストのチャットボットよりも「待たされる」「無視される」ことへの許容度がずっと低いインターフェースです。Nova 2.5 Sonic はその土台をモデル側でさらに引き上げてくれますが、最後の体験を決めるのはやはりアプリケーションの作り込みだ、というのが一番の学びでした。
 
 ---
 
@@ -402,3 +463,6 @@ Nova 2 Sonic は Bedrock のオンデマンド API なので、作成する AWS 
 - [Amazon Bedrock のサーバーレスモデル自動有効化 (What's New, 2025/10)](https://aws.amazon.com/about-aws/whats-new/2025/10/amazon-bedrock-automatic-enablement-serverless-foundation-models/)
 - [Introducing Amazon Nova 2 Sonic (AWS News Blog)](https://aws.amazon.com/blogs/aws/introducing-amazon-nova-2-sonic-next-generation-speech-to-speech-model-for-conversational-ai/)
 - [aws-samples/amazon-nova-samples](https://github.com/aws-samples/amazon-nova-samples)
+- [Getting Started / Migrating to Nova 2.5 Sonic（aws-samples）](https://github.com/aws-samples/amazon-nova-samples/blob/main/speech-to-speech/amazon-nova-2.5-sonic/Getting_Started_and_Migrating_to_Nova_2.5_Sonic.md)
+- [Nova Sonic 2.5 Prompt Engineering — Best Practices Guide（aws-samples）](https://github.com/aws-samples/amazon-nova-samples/blob/main/speech-to-speech/amazon-nova-2.5-sonic/Nova_Sonic_2.5_Prompting_Guide.md)
+- [Nova 2.5 Sonic モデルカード（Amazon Bedrock）](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-amazon-nova-2-5-sonic.html)

@@ -1,12 +1,12 @@
 """
-セットアップ完了時のあいさつ — Nova 2 Sonic から一言だけ話しかける
+セットアップ完了時のあいさつ — Nova 2.5 Sonic から一言だけ話しかける
 
 対話はせず、以下の流れで「AI から話し始めて、勝手に終わる」ようにしています。
 
   1. システムプロンプトで「話す内容」を決める
   2. 音声入力ストリームを開き、無音を流しておく (ミュートしたマイクの代わり)
   3. Cross-modal input (USER ロールのテキスト) を 1 回送り、話し始める合図にする
-     ※ Nova 2 Sonic はユーザー入力が無いと話し始めない
+     ※ Nova 2.5 Sonic はユーザー入力が無いと話し始めない
   4. AI の発話 (contentEnd: END_TURN) を受け取ったらセッションを閉じる
   5. 受け取った音声を WAV に保存し、OS 標準のプレイヤーで再生する
 
@@ -35,19 +35,21 @@ INPUT_SAMPLE_RATE = 16000
 SILENCE_CHUNK_SEC = 0.032  # 32ms ごとに無音を送る
 WELCOME_TIMEOUT_SEC = 30
 
-WELCOME_LINE = "Welcome to AWS Deep Cuts! Let's dig into Amazon Nova 2 Sonic together."
+WELCOME_LINE = "Welcome to AWS Deep Cuts! Let's dig into Amazon Nova 2.5 Sonic together."
+# Nova 2.5 Sonic は指示を文字どおりに守る傾向が強く、"Do not ..." のような否定形は
+# かえって禁止した内容を口にさせやすい (公式の Prompting Guide)。望む振る舞いだけを肯定形で書く。
 SYSTEM_PROMPT = (
-    "You are the voice of AWS Deep Cuts, a tech series that digs deep into hidden gems of AWS. "
-    "When you receive any message, say exactly the following sentence in a cheerful, energetic tone, "
-    f'and nothing else: "{WELCOME_LINE}" '
-    "Do not ask any questions and do not add anything before or after it."
+    "You are the cheerful voice of AWS Deep Cuts, a tech series that digs deep into hidden gems of AWS.\n"
+    "- When the session starts, greet the listener with exactly this one sentence, "
+    f'in an energetic tone: "{WELCOME_LINE}"\n'
+    "- That single sentence is your whole reply; end your turn right after it."
 )
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "output" / "welcome.wav"
 
 
 async def generate_welcome(voice_id: str = "matthew") -> tuple[bytes, str]:
-    """Nova 2 Sonic にあいさつを話させ、(PCM 音声, 書き起こし) を返す"""
+    """Nova 2.5 Sonic にあいさつを話させ、(PCM 音声, 書き起こし) を返す"""
     from aws_sdk_bedrock_runtime.client import InvokeModelWithBidirectionalStreamOperationInput
     from aws_sdk_bedrock_runtime.models import (
         BidirectionalInputPayloadPart,
@@ -235,7 +237,7 @@ def run_welcome() -> bool:
         print(aws_auth.format_error_for_console(info))
         return False
 
-    print(f"  🔊 Nova 2 Sonic: \"{text or WELCOME_LINE}\"")
+    print(f"  🔊 Nova 2.5 Sonic: \"{text or WELCOME_LINE}\"")
     path = save_wav(pcm)
     if not play_wav(path):
         print(f"  (この環境では自動再生できませんでした。音声ファイル: {path})")

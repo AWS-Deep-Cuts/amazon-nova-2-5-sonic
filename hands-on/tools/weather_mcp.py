@@ -4,7 +4,7 @@
 気象庁の公開 API (https://www.jma.go.jp/bosai/forecast/) を利用して
 指定地域の天気予報を取得する。
 
-Nova 2 Sonic の Tool use で呼び出されることを想定。
+Nova 2.5 Sonic の Tool use で呼び出されることを想定。
 """
 
 import asyncio
@@ -17,7 +17,7 @@ def _fetch_json(url: str):
     with urllib.request.urlopen(req, timeout=5) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
-# ─── Tool Spec (Nova 2 Sonic に渡すツール定義) ─────────────────
+# ─── Tool Spec (Nova 2.5 Sonic に渡すツール定義) ─────────────────
 WEATHER_TOOL_SPEC = {
     "toolSpec": {
         "name": "get_weather",
