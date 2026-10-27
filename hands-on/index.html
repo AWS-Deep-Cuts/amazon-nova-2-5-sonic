@@ -292,6 +292,38 @@
       color: var(--text);
     }
     .toggle-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+    .group-title {
+      font-size: 0.8rem;
+      font-weight: 700;
+      color: var(--text);
+      padding-bottom: 6px;
+      margin: 4px 0 6px;
+      border-bottom: 1px solid var(--border);
+    }
+    .group-title.local { margin-top: 28px; }
+    .group-note { font-size: 0.68rem; color: var(--text-dim); line-height: 1.5; margin-bottom: 14px; }
+    .tag {
+      display: inline-block;
+      font-size: 0.6rem;
+      font-weight: 600;
+      padding: 1px 6px;
+      border-radius: 3px;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+    .tag.nova { background: rgba(255,153,0,0.15); color: var(--accent); }
+    .tag.local { background: rgba(96,165,250,0.15); color: var(--blue); }
+    .speed-row { display: flex; align-items: center; gap: 10px; font-size: 0.75rem; }
+    .speed-row input { flex: 1; accent-color: var(--blue); }
+    .badge-local {
+      font-size: 0.68rem;
+      padding: 3px 8px;
+      border-radius: 4px;
+      background: rgba(96,165,250,0.15);
+      color: var(--blue);
+      cursor: pointer;
+      display: none;
+    }
 
     /* ─── Responsive ─── */
     @media (max-width: 600px) {
@@ -305,7 +337,9 @@
   <!-- Top Bar -->
   <div class="topbar">
     <h1>Nova 2.5 Sonic Playground</h1>
-    <div class="topbar-right"></div>
+    <div class="topbar-right">
+      <span class="badge-local" id="badge-speed" onclick="openSettings()" title="ブラウザ側の再生速度です。Nova 2.5 Sonic の機能ではありません"></span>
+    </div>
   </div>
 
   <!-- Main -->
@@ -328,12 +362,8 @@
 
     <!-- Text Input -->
     <div class="input-bar">
-      <input type="text" id="text-input" placeholder="テキスト入力 (Enter送信) — Model-start-first等に使用" disabled>
+      <input type="text" id="text-input" placeholder="Nova 2.5 Sonic にテキストを送る (Enter で送信) — 観点 2 などで使用" disabled>
       <button id="btn-send" disabled onclick="sendText()">Send</button>
-      <label style="display:flex;align-items:center;gap:4px;font-size:0.68rem;color:var(--text-dim);flex-shrink:0;">
-        Speed:<input type="range" id="speed-slider" min="0.5" max="1.5" step="0.05" value="1.0" style="width:70px;accent-color:var(--accent);">
-        <span id="speed-value">1.0x</span>
-      </label>
     </div>
   </div>
 
@@ -341,10 +371,14 @@
   <div class="overlay" id="overlay" onclick="closeSettings()"></div>
   <div class="settings-panel" id="settings-panel">
     <div class="settings-header">
-      <h2>Session Settings</h2>
+      <h2>Settings</h2>
       <button class="close-btn" onclick="closeSettings()">&times;</button>
     </div>
     <div class="settings-body">
+
+      <!-- ═══ Nova 2.5 Sonic に送る設定 ═══ -->
+      <div class="group-title">Nova 2.5 Sonic に送る設定<span class="tag nova">Nova</span></div>
+      <p class="group-note">Start を押したときに、セッション開始のイベントとして Nova 2.5 Sonic に送られる内容です。変更は次の Start から反映されます。</p>
 
       <!-- System Prompt -->
       <div class="field">
@@ -353,6 +387,7 @@
           <button onclick="resetSystemPrompt()">Reset</button>
         </div>
         <textarea class="cfg prompt" id="system-prompt" spellcheck="false"></textarea>
+        <p class="field-note">AI の役割や話し方を指示する文章です (role: SYSTEM のテキストとして送信)</p>
       </div>
 
       <!-- Tool use -->
@@ -361,7 +396,32 @@
           <input type="checkbox" id="chk-tools">
           <label for="chk-tools">Tool use を有効にする (天気取得)</label>
         </div>
+        <p class="field-note">天気取得ツールの定義を promptStart.toolConfiguration として送ります。ツールの実行自体は server.py が行います</p>
       </div>
+
+      <!-- Session Config -->
+      <div class="field">
+        <div class="field-label">
+          <span>Session Config</span>
+          <button onclick="resetSessionConfig()">Reset</button>
+        </div>
+        <textarea class="cfg json" id="session-config" spellcheck="false"></textarea>
+        <p class="field-note">sessionStart イベントの中身: inferenceConfiguration / turnDetectionConfiguration (endpointingSensitivity: LOW, MEDIUM, HIGH)</p>
+      </div>
+
+      <!-- Prompt Config -->
+      <div class="field">
+        <div class="field-label">
+          <span>Prompt Config</span>
+          <button onclick="resetPromptConfig()">Reset</button>
+        </div>
+        <textarea class="cfg json" id="prompt-config" spellcheck="false"></textarea>
+        <p class="field-note">promptStart イベントの中身: audioOutputConfiguration の voiceId (話者)、sampleRateHertz (8000/16000/24000)</p>
+      </div>
+
+      <!-- ═══ このプレイグラウンドの設定 ═══ -->
+      <div class="group-title local">このプレイグラウンドの設定<span class="tag local">ブラウザ側</span></div>
+      <p class="group-note"><strong>Nova 2.5 Sonic の機能ではありません。</strong>ブラウザや中継サーバー (server.py) 側の処理の設定です。Nova 2.5 Sonic に送る設定は上の項目だけです。</p>
 
       <!-- Mic processing -->
       <div class="field">
@@ -369,7 +429,20 @@
           <input type="checkbox" id="chk-mic-processing" checked>
           <label for="chk-mic-processing">マイク音声の自動補正 (自動音量調整・ノイズ抑制)</label>
         </div>
-        <p class="field-note">ブラウザが声の大きさを自動でそろえ、雑音を消します。声の大小や抑揚をそのまま Nova に届けたいとき (観点 6) はオフにしてください。エコー除去は、AI が自分の声を拾って会話が途切れるのを防ぐため常にオンです。変更は次の Start から反映されます。</p>
+        <p class="field-note">ブラウザが、マイクの声の大きさを自動でそろえ、雑音を消してから Nova に送ります。声の大小や抑揚をそのまま届けたいとき (観点 6) はオフにしてください。エコー除去は、AI が自分の声を拾って会話が途切れるのを防ぐため常にオンです。変更は次の Start から反映されます。</p>
+      </div>
+
+      <!-- Playback speed -->
+      <div class="field">
+        <div class="field-label">
+          <span>AI の声の再生速度</span>
+          <button onclick="resetPlaybackSpeed()">Reset</button>
+        </div>
+        <div class="speed-row">
+          <input type="range" id="speed-slider" min="0.5" max="1.5" step="0.05" value="1.0">
+          <span id="speed-value">1.00x</span>
+        </div>
+        <p class="field-note">Nova 2.5 Sonic から受け取った音声を、ブラウザが速く / 遅く再生するだけの機能です。<strong>Nova が話す速さを変えるものではありません</strong> (Nova には話す速さを指定する設定はありません)。再生速度を変えると、声の高さも一緒に変わります (観点 8)。</p>
       </div>
 
       <!-- Server URL -->
@@ -379,27 +452,7 @@
           <button onclick="resetServerUrl()">Reset</button>
         </div>
         <input class="cfg" id="server-url" spellcheck="false" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);font-family:var(--mono);font-size:0.73rem;padding:8px 12px;">
-        <p class="field-note">server.py を PORT を変えて起動した場合のみ変更します (既定: ws://127.0.0.1:8765)</p>
-      </div>
-
-      <!-- Advanced: Session Config -->
-      <div class="field">
-        <div class="field-label">
-          <span>Session Config</span>
-          <button onclick="resetSessionConfig()">Reset</button>
-        </div>
-        <textarea class="cfg json" id="session-config" spellcheck="false"></textarea>
-        <p class="field-note">inferenceConfiguration / turnDetectionConfiguration (endpointingSensitivity: LOW, MEDIUM, HIGH)</p>
-      </div>
-
-      <!-- Advanced: Prompt Config -->
-      <div class="field">
-        <div class="field-label">
-          <span>Prompt Config</span>
-          <button onclick="resetPromptConfig()">Reset</button>
-        </div>
-        <textarea class="cfg json" id="prompt-config" spellcheck="false"></textarea>
-        <p class="field-note">audioOutputConfiguration: voiceId, sampleRateHertz (8000/16000/24000)</p>
+        <p class="field-note">ブラウザが接続する中継サーバー (server.py) の URL です。PORT を変えて起動した場合のみ変更します (既定: ws://127.0.0.1:8765)</p>
       </div>
 
     </div>
@@ -538,7 +591,7 @@
         autoGainControl: micProcessing,
       } });
       const applied = mediaStream.getAudioTracks()[0].getSettings();
-      addLog('system', `マイク: 自動音量調整=${applied.autoGainControl ? 'ON' : 'OFF'} / ノイズ抑制=${applied.noiseSuppression ? 'ON' : 'OFF'} / エコー除去=${applied.echoCancellation ? 'ON' : 'OFF'}`);
+      addLog('system', `ブラウザのマイク設定: 自動音量調整=${applied.autoGainControl ? 'ON' : 'OFF'} / ノイズ抑制=${applied.noiseSuppression ? 'ON' : 'OFF'} / エコー除去=${applied.echoCancellation ? 'ON' : 'OFF'}`);
     } catch(err) {
       showError(describeMicError(err));
       cleanup(); return;
@@ -721,7 +774,17 @@
   let scheduledSources = [];
   const speedSlider = $('speed-slider');
   const speedValue = $('speed-value');
-  speedSlider.addEventListener('input', () => { speedValue.textContent = parseFloat(speedSlider.value).toFixed(2) + 'x'; });
+  const badgeSpeed = $('badge-speed');
+  function updateSpeedDisplay() {
+    const rate = parseFloat(speedSlider.value);
+    speedValue.textContent = rate.toFixed(2) + 'x';
+    // 1.0x 以外のときは、ブラウザ側で速度を変えていることを画面上部に常に表示する
+    badgeSpeed.style.display = Math.abs(rate - 1) < 1e-9 ? 'none' : 'inline-block';
+    badgeSpeed.textContent = `再生速度 ${rate.toFixed(2)}x（ブラウザ側）`;
+  }
+  function resetPlaybackSpeed() { speedSlider.value = '1.0'; updateSpeedDisplay(); }
+  speedSlider.addEventListener('input', updateSpeedDisplay);
+  updateSpeedDisplay();
 
   function playAudio(b64) {
     if (!playCtx || playCtx.sampleRate !== outputSampleRate) {
@@ -736,7 +799,7 @@
     buf.getChannelData(0).set(f32);
     const s = playCtx.createBufferSource();
     s.buffer = buf;
-    // 再生速度を適用（< 1.0 でスロー再生）
+    // ブラウザ側の再生速度を適用（< 1.0 でスロー再生。Nova の機能ではない）
     const rate = parseFloat(speedSlider.value);
     s.playbackRate.value = rate;
     s.connect(playCtx.destination);
