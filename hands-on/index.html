@@ -363,6 +363,15 @@
         </div>
       </div>
 
+      <!-- Mic processing -->
+      <div class="field">
+        <div class="toggle-row">
+          <input type="checkbox" id="chk-mic-processing" checked>
+          <label for="chk-mic-processing">マイク音声の自動補正 (自動音量調整・ノイズ抑制)</label>
+        </div>
+        <p class="field-note">ブラウザが声の大きさを自動でそろえ、雑音を消します。声の大小や抑揚をそのまま Nova に届けたいとき (観点 6) はオフにしてください。エコー除去は、AI が自分の声を拾って会話が途切れるのを防ぐため常にオンです。変更は次の Start から反映されます。</p>
+      </div>
+
       <!-- Server URL -->
       <div class="field">
         <div class="field-label">
@@ -431,6 +440,7 @@
   const sessionConfigEl = $('session-config');
   const promptConfigEl = $('prompt-config');
   const chkTools = $('chk-tools');
+  const chkMicProcessing = $('chk-mic-processing');
   const overlay = $('overlay');
   const settingsPanel = $('settings-panel');
   const promptPreviewText = $('prompt-preview-text');
@@ -519,7 +529,16 @@
 
     // 1. マイク
     try {
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { sampleRate:16000, channelCount:1, echoCancellation:true, noiseSuppression:true } });
+      // autoGainControl は指定しないと Chrome では有効になり、声の大小がそろえられてしまう
+      const micProcessing = chkMicProcessing.checked;
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: {
+        sampleRate: 16000, channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: micProcessing,
+        autoGainControl: micProcessing,
+      } });
+      const applied = mediaStream.getAudioTracks()[0].getSettings();
+      addLog('system', `マイク: 自動音量調整=${applied.autoGainControl ? 'ON' : 'OFF'} / ノイズ抑制=${applied.noiseSuppression ? 'ON' : 'OFF'} / エコー除去=${applied.echoCancellation ? 'ON' : 'OFF'}`);
     } catch(err) {
       showError(describeMicError(err));
       cleanup(); return;
