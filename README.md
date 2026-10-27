@@ -5,9 +5,7 @@
 
 解説記事の原稿は [article/amazon-nova-2-5-sonic.md](./article/amazon-nova-2-5-sonic.md) にあります。
 
-> **Note**: このハンズオンは 2026 年 10 月に GA となった **Amazon Nova 2.5 Sonic**（モデル ID: `amazon.nova-2-5-sonic`）に対応しています。Nova 2 Sonic（`amazon.nova-2-sonic-v1:0`）と API・音声（voiceId）・対応言語は共通で、指示により忠実に従い、より簡潔に答えるように改善されています。リポジトリ名は Nova 2 Sonic 時代のものをそのまま使っています。
->
-> Nova 2 Sonic で試したい場合は、環境変数 `NOVA_SONIC_MODEL_ID=amazon.nova-2-sonic-v1:0` を設定して実行してください。
+> **Note**: このハンズオンは 2026 年 10 月に GA となった **Amazon Nova 2.5 Sonic**（モデル ID: `amazon.nova-2-5-sonic`）を使用します。
 
 # AWS Deep Cutsとは
 AWS Deep Cutsは、AWS の最新のサービスやニッチな機能、または高度にアカデミックな知識を要求するサービスなど、多くの人が知らない 『隠れた名曲 = **Deep Cuts**』 を深くまで掘り下げる技術シリーズです。
@@ -80,8 +78,8 @@ $env:AWS_PROFILE="<プロファイル名>"
 ### １．セットアップ + サーバー起動
 
 ```bash
-git clone https://github.com/AWS-Deep-Cuts/amazon-nova-2-sonic.git
-cd amazon-nova-2-sonic/hands-on
+git clone https://github.com/AWS-Deep-Cuts/amazon-nova-2-5-sonic.git
+cd amazon-nova-2-5-sonic/hands-on
 python setup.py
 ```
 
@@ -330,7 +328,7 @@ Nova 2.5 Sonic は Bedrock のオンデマンド API のため、AWS リソー�
 
 ```bash
 cd ../..
-rm -rf amazon-nova-2-sonic
+rm -rf amazon-nova-2-5-sonic
 ```
 
 ## トラブルシューティング

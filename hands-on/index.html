@@ -452,8 +452,8 @@
   resetSystemPrompt();
   resetSessionConfig();
   resetPromptConfig();
-  try { serverUrlEl.value = localStorage.getItem('nova2sonic.serverUrl') || DEFAULTS.serverUrl; } catch(e) { serverUrlEl.value = DEFAULTS.serverUrl; }
-  serverUrlEl.addEventListener('change', () => { try { localStorage.setItem('nova2sonic.serverUrl', serverUrlEl.value.trim()); } catch(e) {} });
+  try { serverUrlEl.value = localStorage.getItem('nova25sonic.serverUrl') || DEFAULTS.serverUrl; } catch(e) { serverUrlEl.value = DEFAULTS.serverUrl; }
+  serverUrlEl.addEventListener('change', () => { try { localStorage.setItem('nova25sonic.serverUrl', serverUrlEl.value.trim()); } catch(e) {} });
   updatePromptPreview();
   checkEnvironment();
 
@@ -474,7 +474,7 @@
   }
   function resetServerUrl() {
     serverUrlEl.value = DEFAULTS.serverUrl;
-    try { localStorage.removeItem('nova2sonic.serverUrl'); } catch(e) {}
+    try { localStorage.removeItem('nova25sonic.serverUrl'); } catch(e) {}
   }
 
   // ─── 動作環境チェック ───────────────────────────

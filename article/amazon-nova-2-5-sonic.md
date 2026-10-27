@@ -1,7 +1,7 @@
 # Amazon Nova 2.5 Sonic を「動かして」分かった、speech-to-speech アプリ実装の勘所 ― Nova 2 からの移行・barge-in・認証の落とし穴まで【AWS Deep Cuts】
 
 > **レベル**: 200〜300（Amazon Bedrock を触ったことがあり、非同期 I/O や WebSocket の基本が分かる方向け）
-> **ハンズオン教材**: https://github.com/AWS-Deep-Cuts/amazon-nova-2-sonic
+> **ハンズオン教材**: https://github.com/AWS-Deep-Cuts/amazon-nova-2-5-sonic
 
 ## TL;DR
 
@@ -428,8 +428,8 @@ Nova Sonic はコンテキストウィンドウ自体は大きいので、履歴
 設定 UI は、最初は voiceId や感度をドロップダウンで選ぶ形にしていました。しかし最終的には、`sessionStart` / `promptStart` に渡す **JSON をそのまま編集する形** にしています。ハンズオンで触った JSON が、そのまま自分のアプリで書くリクエストになるようにするためです。
 
 ```bash
-git clone https://github.com/AWS-Deep-Cuts/amazon-nova-2-sonic.git
-cd amazon-nova-2-sonic/hands-on
+git clone https://github.com/AWS-Deep-Cuts/amazon-nova-2-5-sonic.git
+cd amazon-nova-2-5-sonic/hands-on
 python setup.py   # Python 3.12 以上。認証・権限・リージョンを確認し、AI のあいさつの後にサーバーを起動
 # → index.html をブラウザ (Chrome / Edge) で開く
 ```

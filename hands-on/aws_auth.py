@@ -26,7 +26,7 @@ from typing import Any
 # このハンズオンで利用するリージョン / モデル
 DEFAULT_REGION = "ap-northeast-1"
 SUPPORTED_REGIONS = ("us-east-1", "us-west-2", "ap-northeast-1", "eu-north-1")
-# Nova 2.5 Sonic のモデル ID (Nova 2 Sonic は "amazon.nova-2-sonic-v1:0")。
+# Nova 2.5 Sonic のモデル ID。
 # アカウント/リージョンで直接呼び出せない場合は、環境変数でクロスリージョン推論
 # プロファイル (例: us.amazon.nova-2-5-sonic) などに切り替えられる。
 DEFAULT_MODEL_ID = "amazon.nova-2-5-sonic"
