@@ -54,6 +54,25 @@ async def _create_bedrock_client():
     return await aws_auth.create_bedrock_runtime_client()
 
 
+def _to_sonic_tool_spec(spec: dict) -> dict:
+    """ツール定義を Nova Sonic の promptStart 用の形式に変換する
+
+    Converse API と違い、Nova Sonic の inputSchema.json は JSON スキーマを
+    「文字列」で渡す必要がある (dict のままだと ValidationException になる)。
+    """
+    tool = spec["toolSpec"]
+    schema = tool["inputSchema"]["json"]
+    return {
+        "toolSpec": {
+            "name": tool["name"],
+            "description": tool["description"],
+            "inputSchema": {
+                "json": schema if isinstance(schema, str) else json.dumps(schema, ensure_ascii=False)
+            },
+        }
+    }
+
+
 def _error_message(exc: BaseException, phase: str) -> dict:
     """例外をブラウザ向けのエラーメッセージに変換し、ターミナルにも出力する"""
     info = aws_auth.describe_error(exc)
@@ -148,8 +167,7 @@ class SonicSession:
                 "mediaType": "application/json"
             }
             prompt_start["event"]["promptStart"]["toolConfiguration"] = {
-                "tools": [WEATHER_TOOL_SPEC],
-                "toolChoice": {"auto": {}},
+                "tools": [_to_sonic_tool_spec(WEATHER_TOOL_SPEC)],
             }
 
         await self._send_event(prompt_start)

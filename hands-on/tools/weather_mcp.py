@@ -33,7 +33,8 @@ WEATHER_TOOL_SPEC = {
                     "area": {
                         "type": "string",
                         "description": (
-                            "Area name in Japanese (e.g. '東京', '大阪', '福岡'). "
+                            "Area name in Japan, in Japanese or English "
+                            "(e.g. '東京' or 'Tokyo', '大阪' or 'Osaka'). "
                             "If unknown, use '東京'."
                         ),
                     },
@@ -124,19 +125,53 @@ def _format_temps(time_defines: list, temps: list) -> str:
     return " / ".join(f"{label}{temp}℃" for label, temp in day)
 
 
+# 英語 (ローマ字) の地域名 → AREA_CODES のキー
+# Nova 2.5 Sonic は日本語が非対応のため、英語で会話するとツールの引数も英語になりやすい
+ROMAJI_AREAS = {
+    "hokkaido": "北海道", "sapporo": "札幌", "aomori": "青森", "iwate": "岩手",
+    "miyagi": "宮城", "sendai": "仙台", "akita": "秋田", "yamagata": "山形",
+    "fukushima": "福島", "ibaraki": "茨城", "tochigi": "栃木", "gunma": "群馬",
+    "saitama": "埼玉", "chiba": "千葉", "tokyo": "東京", "kanagawa": "神奈川",
+    "yokohama": "横浜", "niigata": "新潟", "toyama": "富山", "ishikawa": "石川",
+    "kanazawa": "石川", "fukui": "福井", "yamanashi": "山梨", "nagano": "長野",
+    "gifu": "岐阜", "shizuoka": "静岡", "aichi": "愛知", "nagoya": "名古屋",
+    "mie": "三重", "shiga": "滋賀", "kyoto": "京都", "osaka": "大阪",
+    "hyogo": "兵庫", "kobe": "神戸", "nara": "奈良", "wakayama": "和歌山",
+    "tottori": "鳥取", "shimane": "島根", "okayama": "岡山", "hiroshima": "広島",
+    "yamaguchi": "山口", "tokushima": "徳島", "kagawa": "香川", "ehime": "愛媛",
+    "kochi": "高知", "fukuoka": "福岡", "saga": "佐賀", "nagasaki": "長崎",
+    "kumamoto": "熊本", "oita": "大分", "miyazaki": "宮崎", "kagoshima": "鹿児島",
+    "okinawa": "沖縄", "naha": "那覇",
+}
+
+
+def _resolve_area(area: str):
+    """地域名 (日本語 / 英語) から (表示名, 地域コード) を返す。見つからなければ None"""
+    if area in AREA_CODES:
+        return area, AREA_CODES[area]
+    # 英語表記: "Tokyo", "Osaka-fu", "Fukuoka Prefecture" などを許容
+    letters = "".join(ch for ch in area.lower() if ch.isascii() and ch.isalpha())
+    if letters:
+        for romaji in sorted(ROMAJI_AREAS, key=len, reverse=True):
+            if letters.startswith(romaji):
+                key = ROMAJI_AREAS[romaji]
+                return key, AREA_CODES[key]
+    # 日本語の部分一致 ("東京都", "大阪市" など)
+    for key, code in AREA_CODES.items():
+        if key in area:
+            return key, code
+    return None
+
+
 async def get_weather(params: dict) -> dict:
     """気象庁 API から天気予報を取得"""
-    area = params.get("area", "東京")
+    area = str(params.get("area") or "東京").strip() or "東京"
 
     # 地域コード解決
-    area_code = AREA_CODES.get(area)
-    if not area_code:
-        # 部分一致を試す
-        for key, code in AREA_CODES.items():
-            if key in area or area in key:
-                area_code = code
-                area = key
-                break
+    resolved = _resolve_area(area)
+    area_code = None
+    if resolved:
+        area, area_code = resolved
 
     note = None
     if not area_code:

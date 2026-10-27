@@ -227,6 +227,23 @@ if role == "ASSISTANT" and self._content_stages.get(content_name) == "FINAL":
 
 Tool use の流れ自体は Converse API とよく似ています。モデルが `toolUse` イベント（`toolName`, `toolUseId`, `content` = 引数の JSON）を送ってきたら、クライアントは `type: TOOL`・`role: TOOL` の content として `toolResult` を返します。
 
+ただし、ツール定義の書き方は Converse API と同じではありません。ハンズオンでは、Tool use をオンにするとセッションが「リクエストの内容が不正です（`ValidationException`）」で始まらない、という問題に当たりました。原因はツール定義の `inputSchema.json` です。Converse API では JSON スキーマを **オブジェクト** のまま渡しますが、Nova Sonic の `promptStart` では JSON スキーマを **文字列にして** 渡します。AWS 公式サンプルも Strands Agents の実装も、`json.dumps()` してから渡しています。
+
+```python
+"toolConfiguration": {
+    "tools": [{
+        "toolSpec": {
+            "name": "get_weather",
+            "description": "Get today's weather forecast for a location in Japan. ...",
+            # ✕ "json": {"type": "object", ...}    ← Converse API の書き方
+            "inputSchema": {"json": json.dumps({"type": "object", ...})},  # ○ 文字列にする
+        }
+    }]
+}
+```
+
+Converse API のツール定義を流用すると、ここでつまずきます。あわせて、公式サンプルでは使われていない `toolChoice: {"auto": {}}` も外しました（指定しなければ、ツールを呼ぶかどうかはモデルが判断します）。
+
 音声ならではの注意点は、**ツールの実行中も双方向ストリームは流れ続けている** ことです。Nova Sonic は非同期のツール呼び出しに対応しており、ツールの実行中もユーザーの新しい入力に応答し続けます。
 
 最初の実装では、レスポンスの受信ループの中で気象庁 API を同期的に呼んでいました（`urllib` による同期 I/O）。そのため、API の応答を待つ間は受信ループ全体が止まっていました。ツールの実行は別タスクに切り出し、同期 I/O はスレッドに逃がすのが正解です。
