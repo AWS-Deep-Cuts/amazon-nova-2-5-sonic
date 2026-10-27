@@ -1,14 +1,14 @@
 """
-AWS Deep Cuts: Amazon Nova 2 Sonic — WebSocket 中継サーバー
+AWS Deep Cuts: Amazon Nova 2.5 Sonic — WebSocket 中継サーバー
 
-ブラウザ (index.html) と Bedrock Nova 2 Sonic の間を中継する。
+ブラウザ (index.html) と Bedrock Nova 2.5 Sonic の間を中継する。
 セキュリティ: 127.0.0.1 にのみバインドし、外部からのアクセスを遮断する。
 
 起動方法:
   python server.py
 
-依存パッケージ:
-  pip install aws-sdk-bedrock-runtime websockets
+依存パッケージ (Python 3.12 以上):
+  pip install -r requirements.txt
 """
 
 import asyncio
@@ -16,17 +16,29 @@ import json
 import uuid
 import base64
 import os
+import re
 import signal
 import sys
+import traceback
 from typing import Optional
 
 from websockets.asyncio.server import serve
 
+import aws_auth
+
 # ─── 設定 ────────────────────────────────────────────────────────
 HOST = "127.0.0.1"  # localhost のみ — セキュリティのため外部バインドしない
 PORT = int(os.environ.get("PORT", "8765"))
-REGION = os.environ.get("AWS_REGION", "ap-northeast-1")
-MODEL_ID = "amazon.nova-2-sonic-v1:0"
+# 接続を許可する Origin: file:// で開いた index.html ("null") と localhost のみ。
+# 127.0.0.1 バインドだけでは、ブラウザで開いた任意の Web サイトから
+# ws://127.0.0.1 へ接続される (Cross-Site WebSocket Hijacking) のを防げないため。
+ALLOWED_ORIGINS = [
+    None,
+    "null",
+    re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"),
+]
+REGION = aws_auth.resolve_region()
+MODEL_ID = aws_auth.MODEL_ID
 
 # ─── ツール読み込み ──────────────────────────────────────────────
 from tools.weather_mcp import get_weather, WEATHER_TOOL_SPEC
@@ -34,17 +46,27 @@ from tools.weather_mcp import get_weather, WEATHER_TOOL_SPEC
 
 # ─── Bedrock クライアント初期化 ──────────────────────────────────
 async def _create_bedrock_client():
-    """aws_sdk_bedrock_runtime を使って AsyncBedrockRuntimeClient を生成"""
-    from aws_sdk_bedrock_runtime.client import AsyncBedrockRuntimeClient
-    from aws_sdk_bedrock_runtime.config import AsyncBedrockRuntimeConfig
+    """AsyncBedrockRuntimeClient を生成 (認証・通信方式の詳細は aws_auth.py を参照)
 
-    config = await AsyncBedrockRuntimeConfig.resolve(region=REGION)
-    return AsyncBedrockRuntimeClient(config=config)
+    SDK 標準のクレデンシャルチェーンは IAM Identity Center (SSO) や aws login、
+    AssumeRole プロファイルに対応していないため、boto3 の解決結果を渡す。
+    """
+    return await aws_auth.create_bedrock_runtime_client()
+
+
+def _error_message(exc: BaseException, phase: str) -> dict:
+    """例外をブラウザ向けのエラーメッセージに変換し、ターミナルにも出力する"""
+    info = aws_auth.describe_error(exc)
+    print(f"[Error] {phase}")
+    print(aws_auth.format_error_for_console(info))
+    if os.environ.get("DEBUG"):
+        traceback.print_exception(exc)
+    return {"type": "error", "phase": phase, **info}
 
 
 # ─── Bedrock セッション ──────────────────────────────────────────
 class SonicSession:
-    """1つのブラウザ接続に対応する Nova 2 Sonic セッション"""
+    """1つのブラウザ接続に対応する Nova 2.5 Sonic セッション"""
 
     def __init__(self, ws, config: dict):
         self.ws = ws
@@ -56,15 +78,21 @@ class SonicSession:
         # contentName → generationStage のマッピング (重複テキスト抑制用)
         self._content_stages: dict[str, str] = {}
         self._content_roles: dict[str, str] = {}
+        self._response_task: Optional[asyncio.Task] = None
+        self._tool_tasks: set[asyncio.Task] = set()
+        self._closing = False
+        self._error_sent = False
 
     async def start(self):
-        self.is_active = True
-
         # クライアントから送られた設定を使用
-        session_config = self.config.get("sessionConfig", {})
-        prompt_config = self.config.get("promptConfig", {})
-        system_prompt = self.config.get("systemPrompt", "You are a helpful assistant.")
+        session_config = self.config.get("sessionConfig") or {}
+        prompt_config = self.config.get("promptConfig") or {}
+        system_prompt = (self.config.get("systemPrompt") or "").strip() or "You are a helpful assistant."
         enable_tools = self.config.get("enableTools", False)
+        if not isinstance(session_config, dict) or not isinstance(prompt_config, dict):
+            raise ValueError("Session Config / Prompt Config は JSON オブジェクト ({...}) で指定してください。")
+
+        self.is_active = True
 
         # Bedrock クライアント生成 & ストリーム開始
         from aws_sdk_bedrock_runtime.client import (
@@ -174,14 +202,21 @@ class SonicSession:
             }
         })
 
+        # 認証・権限エラーは応答ヘッダー受信時 (await_output) に判明することが多い。
+        # 少しだけ待ち、失敗ならブラウザに "Started" を出す前にエラーとして返す。
+        try:
+            await asyncio.wait_for(asyncio.shield(self.stream.await_output()), timeout=2)
+        except asyncio.TimeoutError:
+            pass  # 応答ヘッダーが遅いだけなら、そのまま開始する
+
         # レスポンス処理タスク開始
-        asyncio.create_task(self._process_responses())
+        self._response_task = asyncio.create_task(self._process_responses())
 
     async def send_audio(self, base64_data: str):
-        """ブラウザから受信した音声チャンクを Nova Sonic に転送"""
+        """ブラウザから受信した音声チャンクを Nova 2.5 Sonic に転送"""
         if not self.is_active:
             return
-        await self._send_event({
+        await self._send_event_safe({
             "event": {
                 "audioInput": {
                     "promptName": self.prompt_name,
@@ -196,7 +231,7 @@ class SonicSession:
         if not self.is_active:
             return
         cn = str(uuid.uuid4())
-        await self._send_event({
+        await self._send_event_safe({
             "event": {
                 "contentStart": {
                     "promptName": self.prompt_name,
@@ -208,7 +243,7 @@ class SonicSession:
                 }
             }
         })
-        await self._send_event({
+        await self._send_event_safe({
             "event": {
                 "textInput": {
                     "promptName": self.prompt_name,
@@ -217,24 +252,42 @@ class SonicSession:
                 }
             }
         })
-        await self._send_event({
+        await self._send_event_safe({
             "event": {"contentEnd": {"promptName": self.prompt_name, "contentName": cn}}
         })
 
     async def close(self):
-        if not self.is_active:
+        if self._closing:
             return
+        self._closing = True
+        was_active = self.is_active
         self.is_active = False
-        await self._send_event({
-            "event": {"contentEnd": {"promptName": self.prompt_name, "contentName": self.audio_content_name}}
-        })
-        await self._send_event({"event": {"promptEnd": {"promptName": self.prompt_name}}})
-        await self._send_event({"event": {"sessionEnd": {}}})
-        # ストリームを閉じる
+        for task in list(self._tool_tasks):
+            task.cancel()
+        if self.stream is None:
+            return
+        # 正常終了のイベントを送る (ストリームが既に切れている場合に備えてタイムアウト付き)
+        async def _graceful_end():
+            await self._send_event({
+                "event": {"contentEnd": {"promptName": self.prompt_name, "contentName": self.audio_content_name}}
+            })
+            await self._send_event({"event": {"promptEnd": {"promptName": self.prompt_name}}})
+            await self._send_event({"event": {"sessionEnd": {}}})
+
+        if was_active:
+            try:
+                await asyncio.wait_for(_graceful_end(), timeout=3)
+            except (Exception, asyncio.TimeoutError):
+                pass
         try:
-            await self.stream.input_stream.close()
-        except Exception:
+            await asyncio.wait_for(self.stream.input_stream.close(), timeout=3)
+        except (Exception, asyncio.TimeoutError):
             pass
+        if self._response_task and not self._response_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(self._response_task), timeout=3)
+            except (Exception, asyncio.TimeoutError):
+                self._response_task.cancel()
 
     async def _send_event(self, event: dict):
         """イベントを Bedrock の双方向ストリームに送信"""
@@ -250,26 +303,52 @@ class SonicSession:
         )
         await self.stream.input_stream.send(chunk)
 
-    async def _process_responses(self):
-        """Bedrock からのレスポンスストリームを処理"""
+    async def _send_event_safe(self, event: dict):
+        """ストリーム切断後の送信で例外を連発させないためのラッパー"""
+        if not self.is_active:
+            return
         try:
-            while self.is_active:
-                output = await self.stream.await_output()
-                result = await output[1].receive()
-
-                if result.value and result.value.bytes_:
-                    response_data = result.value.bytes_.decode("utf-8")
-                    json_data = json.loads(response_data)
-                    await self._handle_output(json_data)
-
-        except StopAsyncIteration:
-            pass
+            await self._send_event(event)
         except Exception as e:
             if self.is_active:
-                await self._send_ws({"type": "error", "message": str(e)})
+                self.is_active = False
+                self._error_sent = True
+                await self._send_ws(_error_message(e, "Bedrock への送信"))
+
+    async def _process_responses(self):
+        """Bedrock からのレスポンスストリームを処理"""
+        from aws_sdk_bedrock_runtime.models import InvokeModelWithBidirectionalStreamOutputChunk
+
+        reason = "closed"
+        try:
+            # 認証・権限・リージョンのエラーは多くの場合ここで例外になる
+            _, output_stream = await self.stream.await_output()
+            while True:
+                result = await output_stream.receive()
+                if result is None:  # サーバー側がストリームを閉じた
+                    break
+                if not isinstance(result, InvokeModelWithBidirectionalStreamOutputChunk):
+                    # ValidationException / ThrottlingException などはユニオンのメンバーとして届く
+                    err = result.value if isinstance(getattr(result, "value", None), BaseException) \
+                        else RuntimeError(f"{type(result).__name__}: {getattr(result, 'value', '')}")
+                    raise err
+                if result.value and result.value.bytes_:
+                    json_data = json.loads(result.value.bytes_.decode("utf-8"))
+                    await self._handle_output(json_data)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            if not self._closing:
+                reason = "error"
+                if not self._error_sent:  # 送信側で既に通知済みなら重複させない
+                    self._error_sent = True
+                    await self._send_ws(_error_message(e, "Nova 2.5 Sonic セッション"))
         finally:
+            ended_by_user = self._closing
             self.is_active = False
-            await self._send_ws({"type": "state", "state": "ended"})
+            if not ended_by_user:
+                await self._send_ws({"type": "state", "state": "ended", "reason": reason})
 
     async def _handle_output(self, data: dict):
         """Bedrock からの出力イベントを処理"""
@@ -340,39 +419,47 @@ class SonicSession:
                 "params": tool_content,
             })
 
-            # ツール実行
-            result = await self._execute_tool(tool_name, tool_content)
+            # ツール実行は別タスクで行い、レスポンス受信ループを止めない
+            task = asyncio.create_task(self._run_tool(tool_name, tool_use_id, tool_content))
+            self._tool_tasks.add(task)
+            task.add_done_callback(self._tool_tasks.discard)
 
-            # ToolResult を返す
-            tool_cn = str(uuid.uuid4())
-            await self._send_event({
-                "event": {
-                    "contentStart": {
-                        "promptName": self.prompt_name,
-                        "contentName": tool_cn,
-                        "interactive": False,
-                        "type": "TOOL",
-                        "role": "TOOL",
-                        "toolResultInputConfiguration": {
-                            "toolUseId": tool_use_id,
-                            "type": "TEXT",
-                            "textInputConfiguration": {"mediaType": "text/plain"},
-                        },
-                    }
+    async def _run_tool(self, tool_name: str, tool_use_id: str, tool_content):
+        """ツールを実行し、結果を toolResult としてモデルに返す"""
+        result = await self._execute_tool(tool_name, tool_content)
+        if "error" in result:
+            await self._send_ws({"type": "toolError", "toolName": tool_name, "message": str(result["error"])})
+
+        # ToolResult を返す
+        tool_cn = str(uuid.uuid4())
+        await self._send_event_safe({
+            "event": {
+                "contentStart": {
+                    "promptName": self.prompt_name,
+                    "contentName": tool_cn,
+                    "interactive": False,
+                    "type": "TOOL",
+                    "role": "TOOL",
+                    "toolResultInputConfiguration": {
+                        "toolUseId": tool_use_id,
+                        "type": "TEXT",
+                        "textInputConfiguration": {"mediaType": "text/plain"},
+                    },
                 }
-            })
-            await self._send_event({
-                "event": {
-                    "toolResult": {
-                        "promptName": self.prompt_name,
-                        "contentName": tool_cn,
-                        "content": json.dumps(result, ensure_ascii=False),
-                    }
+            }
+        })
+        await self._send_event_safe({
+            "event": {
+                "toolResult": {
+                    "promptName": self.prompt_name,
+                    "contentName": tool_cn,
+                    "content": json.dumps(result, ensure_ascii=False),
                 }
-            })
-            await self._send_event({
-                "event": {"contentEnd": {"promptName": self.prompt_name, "contentName": tool_cn}}
-            })
+            }
+        })
+        await self._send_event_safe({
+            "event": {"contentEnd": {"promptName": self.prompt_name, "contentName": tool_cn}}
+        })
 
     async def _execute_tool(self, tool_name: str, params_json: str) -> dict:
         """ツールを実行して結果を返す"""
@@ -381,10 +468,12 @@ class SonicSession:
         except json.JSONDecodeError:
             return {"error": "Invalid JSON parameters"}
 
-        if tool_name == "get_weather":
-            return await get_weather(params)
-        else:
+        try:
+            if tool_name == "get_weather":
+                return await get_weather(params)
             return {"error": f"Unknown tool: {tool_name}"}
+        except Exception as e:  # ツールの失敗で会話全体を落とさない
+            return {"error": f"{type(e).__name__}: {e}"}
 
     async def _send_ws(self, msg: dict):
         try:
@@ -400,14 +489,25 @@ async def handle_connection(ws):
 
     try:
         async for raw in ws:
-            msg = json.loads(raw)
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue
             msg_type = msg.get("type", "")
 
             if msg_type == "start":
                 if session:
                     await session.close()
                 session = SonicSession(ws, msg.get("config", {}))
-                await session.start()
+                try:
+                    await session.start()
+                except Exception as e:
+                    # 認証エラーなどでセッションを開始できなかった場合もブラウザへ通知する
+                    await ws.send(json.dumps(_error_message(e, "セッション開始"), ensure_ascii=False))
+                    await session.close()
+                    session = None
+                    await ws.send(json.dumps({"type": "state", "state": "ended", "reason": "error"}))
+                    continue
                 await ws.send(json.dumps({"type": "state", "state": "active"}))
 
             elif msg_type == "audio" and session:
@@ -421,8 +521,10 @@ async def handle_connection(ws):
                     await session.close()
                     session = None
 
-    except Exception:
-        pass
+    except Exception as e:
+        # ブラウザ側の切断 (ConnectionClosed) 以外は内容をターミナルに残す
+        if type(e).__name__ not in ("ConnectionClosedOK", "ConnectionClosedError", "ConnectionClosed"):
+            _error_message(e, "WebSocket 処理")
     finally:
         if session:
             await session.close()
@@ -430,10 +532,29 @@ async def handle_connection(ws):
 
 
 # ─── サーバー起動 ─────────────────────────────────────────────────
+def _check_credentials():
+    """起動時に認証情報を解決できるか確認する (失敗しても起動は継続し、原因を表示)"""
+    print(f"  Profile:   {aws_auth.profile_label()}")
+    if REGION not in aws_auth.SUPPORTED_REGIONS:
+        print(f"  ⚠️  {REGION} は Nova 2.5 Sonic の対応リージョンではない可能性があります "
+              f"(対応: {', '.join(aws_auth.SUPPORTED_REGIONS)})")
+    try:
+        creds = aws_auth.create_boto3_session().get_credentials()
+        if creds is None:
+            from botocore.exceptions import NoCredentialsError
+            raise NoCredentialsError()
+        creds.get_frozen_credentials()
+        print(f"  Auth:      OK ({getattr(creds, 'method', 'unknown')})")
+    except Exception as e:
+        print("  Auth:      NG")
+        print(aws_auth.format_error_for_console(aws_auth.describe_error(e)))
+    print("")
+
+
 async def main():
     print("")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
-    print("  AWS Deep Cuts: Amazon Nova 2 Sonic")
+    print("  AWS Deep Cuts: Amazon Nova 2.5 Sonic")
     print("  WebSocket Relay Server")
     print("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━")
     print(f"  WebSocket: ws://{HOST}:{PORT}")
@@ -441,12 +562,14 @@ async def main():
     print(f"  Model:     {MODEL_ID}")
     print(f"  Security:  127.0.0.1 only (外部アクセス不可)")
     print("")
+    _check_credentials()
     print("  index.html をブラウザで開いてください。")
     print("  Ctrl+C で停止します。")
     print("")
 
     stop_event = asyncio.Event()
     loop = asyncio.get_running_loop()
+    aws_auth.install_quiet_exception_handler(loop)
 
     # Windows / Unix 両対応のシグナルハンドラ
     if sys.platform == "win32":
@@ -454,7 +577,19 @@ async def main():
     else:
         loop.add_signal_handler(signal.SIGINT, stop_event.set)
 
-    server = await serve(handle_connection, HOST, PORT)
+    try:
+        # 音声チャンク (base64) は 1 メッセージ数 KB〜数十 KB なので上限は余裕を持たせる
+        server = await serve(
+            handle_connection, HOST, PORT,
+            origins=ALLOWED_ORIGINS,
+            max_size=4 * 1024 * 1024,
+        )
+    except OSError as e:
+        print(f"  ❌ ポート {PORT} で待ち受けできません: {e}")
+        print("     → 別のターミナルで server.py / setup.py が起動したままになっていないか確認してください。")
+        print("     → 既存のプロセスを停止するか、別ポートで起動してください (例: PORT=8766)。")
+        print("       ※ ポートを変えた場合は index.html の Settings > Server URL も変更してください。")
+        sys.exit(1)
     try:
         await stop_event.wait()
     finally:

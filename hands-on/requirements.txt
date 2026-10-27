@@ -1,0 +1,7 @@
+# Amazon Nova 2.5 Sonic ハンズオン依存パッケージ (Python 3.12 以上)
+# aws-sdk-bedrock-runtime は 1.0 未満で破壊的変更があり得るため上限を固定。
+# [awscrt] は双方向ストリーミングに必要 (既定の aiohttp トランスポートは非対応)
+aws-sdk-bedrock-runtime[awscrt]>=0.11.0,<0.12
+# boto3 1.41 以上: IAM Identity Center (SSO) に加えて `aws login` の認証情報に対応
+boto3>=1.41.0
+websockets>=14.2
